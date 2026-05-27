@@ -1,0 +1,36 @@
+# Chunk 1: Infrastructure & Tunnel Setup
+
+This chunk establishes the foundational AWS EC2 backend, the FastAPI gateway, and the session-based WireGuard tunnel management.
+
+## Proposed Changes
+
+### [Backend] ec2_backend/
+
+#### [NEW] main.py
+FastAPI application entry point.
+- Endpoints for `/session/start`, `/session/end`, and metadata ingestion.
+
+#### [NEW] session_manager.py
+Handles the business logic for interview sessions.
+- Creates unique session IDs.
+- Manages an ephemeral SQLite database for active sessions.
+
+#### [NEW] session_tunnel.py
+Low-level WireGuard interface.
+- Generates Curve25519 keypairs.
+- Provisions `wg0` (or session-specific) interfaces.
+- Generates client config files.
+
+#### [NEW] requirements.txt
+Project dependencies.
+- `fastapi`, `uvicorn`, `pydantic`, `pycryptodome` (for potential encryption), `python-jose` (JWT).
+
+## Verification Plan
+
+### Automated Tests
+- `pytest` for endpoint validation.
+- Scripted check for key generation consistency.
+
+### Manual Verification
+- Execute `curl` commands to start/end sessions.
+- Inspect the filesystem for generated WireGuard configs.

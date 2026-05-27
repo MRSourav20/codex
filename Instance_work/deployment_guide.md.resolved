@@ -1,0 +1,68 @@
+# Coadex 2.0 Deployment & Execution Guide
+
+To properly monitor an interview and use the WireGuard tunnel, the core logic **must run on the AWS EC2 instance**. Running it locally will only work for API testing, but it won't be able to capture the candidate's network traffic.
+
+## 1. Where should each component run?
+
+| Component | Run on EC2? | Run Locally? | Why? |
+| :--- | :---: | :---: | :--- |
+| **FastAPI Gateway** ([backend/api/main.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/backend/api/main.py)) | **YES** | No | Needs to manage the WireGuard tunnel on the real server. |
+| **DNS Monitor** ([backend/monitor_v3.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/backend/monitor_v3.py)) | **YES** | No | Traffic only passes through the EC2 interface (`wg0`). |
+| **Electron Client** | No | **YES** | This is what the *Candidate* installs. |
+| **Reviewer Dashboard** | No | **YES** | Accessed via web browser by the *Interviewer*. |
+
+---
+
+## 2. What to Push to EC2?
+
+You should push the **entire refactored structure** to EC2. Here is the checklist of what is essential:
+
+### ✅ Essential (Push these)
+- `backend/` (All sub-packages: [api](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/Instance_work/dns_event_detector.py#254-285), `dns_monitor`, [enrichment](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/backend/intelligence/domain_intelligence_db.py#213-253), etc.)
+- [requirements.txt](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/requirements.txt) (For Python dependencies)
+- [setup.sh](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/setup.sh) (To install everything on Ubuntu)
+- [.env](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/.env) (Your keys - private to the server)
+
+### ❌ Non-Essential (Keep local)
+- `Instance_work/` (Old scripts - for reference only)
+- `ec2_backend/` (Old scripts - for reference only)
+- `tests/` (If not running tests on server)
+
+---
+
+## 3. Step-by-Step EC2 Guide (The "Push" Plan)
+
+### Step 1: Upload Files
+Use SCP or SFTP to upload the `Coadex 2_0` folder content to your Ubuntu home directory (`/home/ubuntu/`).
+*Recommended command (from your local machine):*
+```bash
+scp -i adk92.pem -r "C:\Users\mohap\OneDrive\Desktop\Coadex 2_0\*" ubuntu@3.235.42.166:~/Coadex-2.0/
+```
+
+### Step 2: Initialize Server
+Connect to your EC2 and run the harden setup:
+```bash
+ssh -i adk92.pem ubuntu@3.235.42.166
+cd ~/Coadex-2.0/
+chmod +x setup.sh
+sudo ./setup.sh
+```
+
+### Step 3: Run the Engines
+Open two terminal sessions (using `tmux` or `screen` is recommended):
+
+**Terminal 1 (The API):**
+```bash
+source venv/bin/activate
+python3 backend/api/main.py
+```
+
+**Terminal 2 (The Monitor - Needs root):**
+```bash
+sudo venv/bin/python3 backend/monitor_v3.py
+```
+
+## 4. Final Recommendation
+- **Do NOT** run another backend. The `backend/` folder I created contains everything you need.
+- **Delete** or move `Instance_work` and `ec2_backend` into an `archive/` folder to avoid confusion.
+- The [backend/api/main.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/backend/api/main.py) is your **only** necessary entry point for the web.

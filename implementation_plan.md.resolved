@@ -1,0 +1,418 @@
+# 🛡️ Interview Integrity Platform — Master Implementation Plan
+
+> **Project:** Coadex 2.0 — AI-Cheating Detection for Live Remote Interviews  
+> **Goal:** 5-signal monitoring (Network · Browser · System · Webcam · Typing) with 70–75% lower compute/storage overhead  
+> **Stack:** WireGuard · PyShark · MediaPipe Lite · psutil · Chrome MV3 · SQLite · Python 3.11+
+
+---
+
+## 📦 HOW TO USE THIS PLAN
+
+This is chunked into **6 independent build chunks**. Each chunk = one conversation with me. You do each chunk, hand me what I ask for at the end, then we move to the next.
+
+**You tell me:** "Start Chunk X" → I give you exact code to build → You run it → You give me outputs/keys → Next chunk.
+
+---
+
+## CHUNK 1 — Infrastructure & Tunnel Setup
+**Duration:** 1–2 days  
+**What gets built:** Server setup, WireGuard VPN tunnel, ephemeral key generation  
+**You need to give me:**
+- An AWS EC2 instance (Ubuntu 22.04, t3.micro is fine for MVP) — OR say "use local" and we'll do localhost testing
+- SSH access to that server (or just your local machine)
+- Python 3.11+ installed
+
+### Steps
+
+#### 1.1 Server Provision & Base Install
+```
+Actions:
+- Spin up EC2 Ubuntu 22.04 t3.micro (Free Tier)
+- Open ports: 51820/UDP (WireGuard), 8000/TCP (API), 22/TCP (SSH)
+- Install: python3.11, pip, wireguard, sqlite3
+```
+
+#### 1.2 WireGuard VPN Tunnel (Ephemeral Keys)
+```
+Build: session_tunnel.py
+- generate_session_keys(session_id) → creates unique peer keypair
+- start_tunnel(session_id) → spins up WireGuard interface
+- stop_tunnel(session_id) → tears down interface, revokes keys
+- Keys are time-limited (auto-expire at session end)
+```
+
+#### 1.3 Session Lifecycle Manager
+```
+Build: session_manager.py
+- create_session(candidate_id) → returns session_id + WireGuard config
+- end_session(session_id) → flush logs, revoke keys, clean up
+- GET /session/start → returns WireGuard config for candidate
+- POST /session/end → triggers teardown
+```
+
+#### 1.4 Base FastAPI Backend
+```
+Build: main.py (FastAPI)
+Endpoints:
+  POST /session/start
+  POST /session/end/{session_id}
+  GET  /report/{session_id}
+  POST /events/{session_id}   ← receives monitoring events from client
+```
+
+**✅ Chunk 1 Done When:** You can `POST /session/start`, get a WireGuard config back, and `POST /session/end` cleans it up.
+
+---
+
+## CHUNK 2 — Network Monitoring Layer
+**Duration:** 1–2 days  
+**What gets built:** DNS/SNI capture, EMA-based traffic anomaly detection, domain caching  
+**Depends on:** Chunk 1 (server running)
+
+### Steps
+
+#### 2.1 Packet Capture Engine (PyShark)
+```
+Build: network_monitor.py
+- capture_dns_queries(interface) → logs domain + timestamp every 5s sample
+- capture_tls_sni(interface) → extracts SNI hostname from TLS ClientHello
+- Uses PyShark (wraps TShark) — runs on gateway server
+```
+
+#### 2.2 EMA Anomaly Detector
+```
+Build: traffic_analyzer.py
+- TrafficEMA class:
+    update(new_value) → metric = 0.2*new + 0.8*prev
+    is_anomaly() → True if deviation > 2σ from baseline
+- Tracks 3 metrics: packet_count, bytes_per_sec, request_frequency
+- Triggers alert event when anomaly detected
+```
+
+#### 2.3 Domain Cache + Threat Check
+```
+Build: domain_classifier.py
+- LRUCache(maxsize=500) for domain categories
+- classify_domain(domain) → "safe" | "suspicious" | "ai_helper"
+- Hardcoded AI helper list: chatgpt.com, copilot.microsoft.com, claude.ai, gemini.google.com, etc.
+- Optional: VirusTotal free API for unknown domains (1st hit only, then cached)
+```
+
+#### 2.4 Compact Event Logger (Binary Format)
+```
+Build: event_logger.py
+- 8 bytes per event: [event_code(1B), ts_delta_ms(3B), value1(2B), value2(2B)]
+- EVENT_CODES dict (paste=0x02, tab_switch=0x03, gaze_drift=0x04, etc.)
+- CircularBuffer(maxsize=1000) per module
+- flush_to_sqlite(session_id) → writes buffer to DB at session end
+```
+
+**✅ Chunk 2 Done When:** DNS + SNI are being logged every 5s, EMA anomalies are firing, domain cache hits working.
+
+**🔑 What to give me next:** VirusTotal API key (free tier, optional) OR say "skip threat API"
+
+---
+
+## CHUNK 3 — Chrome Extension (Browser Layer)
+**Duration:** 2–3 days  
+**What gets built:** Chrome MV3 extension for tab/URL/clipboard monitoring  
+**Depends on:** Chunk 1 (backend API endpoint for events)
+
+### Steps
+
+#### 3.1 Extension Scaffold (MV3)
+```
+Files to build:
+- manifest.json (MV3, permissions: tabs, clipboardRead, activeTab, scripting)
+- background.js (service worker)
+- content.js (injected into pages)
+- popup.html / popup.js (optional UI)
+```
+
+#### 3.2 Tab Switch Aggregation (NOT logging every event)
+```
+Build in background.js:
+- Track tab_switches_per_minute (rolling window)
+- Track avg_focus_duration_sec
+- Track suspicious_domains_visited[]
+- ONLY send event to backend when: switches > 5 per 10s window
+- Store metrics object, NOT individual tab events
+```
+
+#### 3.3 Clipboard Paste Detection
+```
+Build in content.js:
+- Listen to 'paste' event
+- Flag if: charCount > 200 AND duration < 1s (physically impossible to type)
+- Flag if: 3+ pastes in < 30s
+- Flag if: repeated identical content
+- POST flagged events to /events/{session_id}
+```
+
+#### 3.4 Navigation Flow (Delta Encoding)
+```
+Build in background.js:
+- domains_visited[] → indexed list
+- transitions[] → [{from_idx, to_idx, duration_sec}]
+- Store domain index references, NOT full URLs
+- Saves 70% vs storing raw URLs
+```
+
+#### 3.5 Focus Change Threshold Alerting
+```
+- Count focus changes in 10-second windows
+- Log ONLY when rate > 5 changes/10s (abnormal)
+- Normal focus changes = ignored (99% of data discarded)
+```
+
+**✅ Chunk 3 Done When:** Extension installed in Chrome, tab switches aggregate correctly, paste events POST to backend.
+
+**🔑 What to give me next:** The Chrome extension .zip (for me to review if needed) OR just proceed to Chunk 4
+
+---
+
+## CHUNK 4 — System & Process Monitor (Electron Agent)
+**Duration:** 1–2 days  
+**What gets built:** Cross-platform desktop agent for process scanning, VM detection  
+**Depends on:** Chunk 1 (backend + event endpoint)
+
+### Steps
+
+#### 4.1 Process Scanner (psutil)
+```
+Build: process_monitor.py
+- Startup: baseline_hash = hash(frozenset(get_process_names()))
+- Every 30s: compare current_hash vs baseline_hash
+- If different: compute delta (only NEW processes)
+- Log only new processes — NOT entire process list every 30s
+
+BLACKLIST = {
+  "zoom", "anydesk", "teamviewer", "rustdesk",
+  "vmware", "virtualbox", "obs", "chatgpt", "copilot-app"
+}
+
+Storage target: 15MB → 0.5MB per session (99% reduction)
+```
+
+#### 4.2 VM Fingerprint (One-Time at Start)
+```
+Build: vm_detector.py
+- check_cpu_flags() → detect hypervisor CPU flag
+- check_audio_devices() → look for virtual audio (e.g., "VB-Audio")
+- check_disk_model() → look for "VBOX", "VMWARE", "QEMU" strings
+- Run ONCE at session start → cache result → never re-run
+- Flag in session metadata if VM detected
+```
+
+#### 4.3 Electron Wrapper (Optional for MVP)
+```
+If building desktop app:
+- Electron + Node.js shell
+- Kiosk mode (disables Alt+Tab, other windows)
+- Calls Python agent via child_process
+- Shows only interview UI
+
+For MVP: Can skip Electron and run Python agent separately
+```
+
+**✅ Chunk 4 Done When:** Process scanner running, VM check fires once at start, blacklisted processes trigger events to backend.
+
+**🔑 What to give me next:** Nothing required — proceed directly to Chunk 5
+
+---
+
+## CHUNK 5 — Webcam Pipeline (MediaPipe Lite)
+**Duration:** 2–3 days  
+**What gets built:** Face detection, head pose estimation, gaze zone classification  
+**Depends on:** Chunk 1 (event logger)
+
+### Steps
+
+#### 5.1 Adaptive Frame Sampling
+```
+Build: webcam_monitor.py
+- Default: 1 FPS (massive reduction from 30fps)
+- If anomaly_detected: switch to 5 FPS for 30s burst
+- Returns to 1 FPS after burst window
+
+Effect: 97% fewer frames processed
+```
+
+#### 5.2 MediaPipe FaceMesh Lite Integration
+```
+- Use mediapipe.solutions.face_mesh (lite model, not full)
+- Detect 468 face landmarks at 1 FPS
+- Extract: nose tip, eye corners, mouth corners for pose estimation
+- 70% fewer computation tokens vs full model
+```
+
+#### 5.3 Head Pose → Gaze Zone Classifier
+```
+Build: gaze_classifier.py
+- Solve PnP (3D→2D projection) using generic face model
+- Output: yaw (left-right), pitch (up-down)
+- Map to zones: ["center", "edge", "off_screen", "down"]
+- Store ZONE only — NOT pixel coordinates
+
+Baseline: avg_pose(first_20_frames) → freeze baseline
+Alert only: deviation > 1.5σ from baseline
+```
+
+#### 5.4 Attention Window Aggregation
+```
+Per 5-minute window, output:
+{
+  "attention_score": 0-100,
+  "drift_count": int,
+  "off_screen_sec": int,
+  "side_glances": int
+}
+Store aggregate, NOT individual frame events
+90% data reduction vs per-frame logging
+```
+
+**✅ Chunk 5 Done When:** Webcam running at 1fps, face zones classified, gaze drift events firing on > 1.5σ deviation.
+
+**🔑 What to give me next:** Nothing required — proceed directly to Chunk 6
+
+---
+
+## CHUNK 6 — Anomaly Engine + Dashboard
+**Duration:** 2–3 days  
+**What gets built:** Scoring engine, correlation rules, report generator, reviewer dashboard  
+**Depends on:** Chunks 1–5 all working
+
+### Steps
+
+#### 6.1 Lookup Table Scoring Engine
+```
+Build: anomaly_engine.py
+
+RISK_TABLE = {
+  "paste_small": 2,    "paste_large": 8,    "paste_code": 12,
+  "tab_switch_low": 0, "tab_switch_high": 5,
+  "gaze_normal": 0,    "gaze_repeated": 6,  "gaze_sustained": 10,
+  "domain_safe": 0,    "domain_suspicious": 8, "domain_ai_helper": 15,
+  "blacklist_process": 20, "vm_detected": 10,
+  "typing_spike": 8,   "idle_anomaly": 3,
+}
+
+score = sum(RISK_TABLE[event] for event in buffer)
+# Threshold: score > 15 → flag; score > 30 → high priority
+```
+
+#### 6.2 30-Second Buffered Windows
+```
+- Collect all signals per 30s window
+- Process buffer together (not real-time)
+- Reduces context switches + redundant checks
+- 70% reduction in processing overhead
+```
+
+#### 6.3 Correlation Bonus Rules
+```
+# Only checked when base score > 5
+if paste_event AND tab_to_ai_domain: score += 5
+if gaze_off AND clipboard_paste:     score += 4
+if blacklist_process AND typing_spike: score += 6
+
+# Saves 85% correlation analysis (only runs when threshold met)
+```
+
+#### 6.4 Baseline Freeze (5-Minute Capture)
+```
+baseline = capture_first_5min()  # WPM, tab_rate, focus, network
+# FROZEN after 5 minutes — never updated
+# All anomaly comparisons reference this frozen profile
+```
+
+#### 6.5 Report Generator
+```
+Build: report_generator.py
+- Generate human-readable timeline from event log
+- Output format:
+  | 10:05:12 | Browser | tab_switch | → chatgpt.com | score: 15 |
+  | 10:05:40 | Input   | paste      | 350 chars     | score: 8  |
+  | 10:06:05 | Webcam  | gaze_drift | 5s off-screen | score: 10 |
+- Generate on-demand only (not live)
+- < 5 minutes post-session
+```
+
+#### 6.6 Reviewer Dashboard (Simple Web UI)
+```
+Build: dashboard/ (HTML + Vanilla JS or Next.js)
+- Session list with risk score badges
+- Timeline view of flagged events
+- Filter by: High Risk / Medium / Clean
+- One-click report export (PDF or JSON)
+- Auth: simple JWT login for reviewer
+```
+
+**✅ Chunk 6 Done When:** End-to-end works — start session → monitor → end session → report generated with scores and timeline.
+
+---
+
+## 🔄 CHUNK DEPENDENCY MAP
+
+```
+CHUNK 1: Infrastructure + Tunnel
+   │
+   ├──► CHUNK 2: Network Monitor (runs on server)
+   │
+   ├──► CHUNK 3: Chrome Extension (runs on candidate browser)
+   │
+   ├──► CHUNK 4: Process Agent (runs on candidate machine)
+   │
+   ├──► CHUNK 5: Webcam Pipeline (runs on candidate machine)
+   │
+   └──► CHUNK 6: Anomaly Engine + Dashboard (all chunks feed into this)
+```
+
+> Chunks 2–5 can be built in parallel after Chunk 1.  
+> Chunk 6 integrates everything, so it goes last.
+
+---
+
+## 🔑 WHAT YOU NEED TO PROVIDE ME (Per Chunk)
+
+| Chunk | What to Provide Me |
+|---|---|
+| **Chunk 1** | AWS EC2 SSH access details OR confirm "use local machine" |
+| **Chunk 2** | VirusTotal API key (free) OR say "skip threat API" |
+| **Chunk 3** | Nothing — I generate the full extension code |
+| **Chunk 4** | Nothing — I generate the agent code |
+| **Chunk 5** | Nothing — I generate the webcam pipeline code |
+| **Chunk 6** | Nothing — dashboard + engine code generated by me |
+
+---
+
+## 📊 EXPECTED OUTCOMES (After All 6 Chunks)
+
+| Metric | Before | After Phase 1 | After All Chunks |
+|---|---|---|---|
+| Storage/session | ~215 MB | ~91 MB | ~55 MB |
+| Tokens/session | ~50,000 | ~20,000 | ~12,500 |
+| Processing overhead | 100% | 40% | 25% |
+| Detection accuracy | baseline | >95% | >95% |
+| False positive rate | — | <5% | <5% |
+
+**Annual savings at 1,000 interviews/month:** ~$4,500–8,000
+
+---
+
+## ✅ FINAL VALIDATION CHECKLIST (After All Chunks)
+
+- [ ] Anomaly detection accuracy ≥ 95%
+- [ ] False positive rate < 5%
+- [ ] Token consumption reduced > 60%
+- [ ] Storage reduced > 70%
+- [ ] No PII in raw logs
+- [ ] Report generated < 5 minutes post-session
+- [ ] Tunnel teardown completes < 5s after session end
+- [ ] Baseline frozen correctly at minute 5
+- [ ] Circular buffers prevent memory growth in 3h+ sessions
+- [ ] Consent prompt shown before every session
+
+---
+
+*Ready to start? Just say **"Start Chunk 1"** and tell me: AWS EC2 or local machine?*

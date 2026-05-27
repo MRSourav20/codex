@@ -1,0 +1,26 @@
+# Security
+.env
+*.pem
+key/
+
+# Databases
+*.db
+backend/api/*.db
+dns_logs/*.db
+backend/intelligence/*.db
+
+# Logs & Storage
+dns_logs/
+logs/
+*.jsonl
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+
+# IDEs
+.vscode/
+.idea/

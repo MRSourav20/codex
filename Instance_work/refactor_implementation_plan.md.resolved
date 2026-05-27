@@ -1,0 +1,40 @@
+# Full Project Refactor & Behavioral Intelligence Platform MVP
+
+This plan outlines the refactoring of the Coadex 2.0 interview integrity platform into a clean, modular, and GitHub-ready structure, as well as the implementation of the intelligent DNS enrichment pipeline.
+
+## Proposed Changes
+
+### Core Backend & Orchestration
+Separate the project into clear modules: [api/](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/Instance_work/dns_event_detector.py#254-285), `dns_monitor/`, [enrichment/](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/Instance_work/domain_intelligence_db.py#207-247), [intelligence/](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/Instance_work/domain_intelligence_db.py#405-473), and `anomaly_engine/`.
+
+#### [NEW] [Refactored Structure]
+- `backend/`
+    - [api/](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/Instance_work/dns_event_detector.py#254-285): FastAPI endpoints (session management, events).
+    - `dns_monitor/`: DNS capture (PyShark) and logging.
+    - [enrichment/](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/Instance_work/domain_intelligence_db.py#207-247): Rule-based categorization + Sarvam-2B integration.
+    - [intelligence/](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/Instance_work/domain_intelligence_db.py#405-473): SQLite domain cache and reporting.
+    - `anomaly_engine/`: Behavioral detection logic.
+
+### Module Improvements
+- **[dns_capture.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/Instance_work/dns_capture.py)**: Fix root privilege handling and ensure clean shutdown.
+- **[domain_intelligence_db.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/Instance_work/domain_intelligence_db.py)**: Consolidate SQLite usage and add migration support if schemas change.
+- **[Sarvam_enrichment.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/Instance_work/Sarvam_enrichment.py)**: Correct API endpoints and improve error handling for rate limits.
+- **[monitor_v3.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/Instance_work/monitor_v3.py)**: Clean up orchestrator logic to remove direct Pyshark imports in the class initializer.
+
+### Deployment & Documentation
+- **`setup.sh`**: Automate tshark and dependencies installation on Ubuntu.
+- **`README.md`**: Comprehensive documentation for architecture and deployment.
+- **[requirements.txt](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/ec2_backend/requirements.txt)**: Unified dependencies.
+
+## Verification Plan
+
+### Automated Tests
+- `pytest`: I will add a `tests/` directory to verify:
+    - Rule-based categorization accuracy.
+    - SQLite storage and retrieval (Mocked).
+    - Sarvam API payload structure.
+
+### Manual Verification
+1. Run `setup.sh` in a simulated Ubuntu environment (if possible) or verify commands.
+2. Launch [monitor_v3.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/Instance_work/monitor_v3.py) and verify real-time categorization of domains like `google.com` and `openai.com`.
+3. Check `dns_logs/` for structured JSON and SQLite output.
