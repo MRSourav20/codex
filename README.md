@@ -1,58 +1,82 @@
-# Coadex 2.0 - Behavioral Interview Integrity Platform
+# Coadex 2.0: AI-Powered Behavioral Interview Integrity
 
-Coadex 2.0 is a lightweight behavioral intelligence platform designed to detect AI-assisted cheating during remote technical interviews. Unlike traditional proctoring, it focuses on metadata-level network monitoring and gaze zone detection.
+**Coadex 2.0** is a next-generation integrity platform designed to detect AI-assisted cheating during remote technical interviews. By monitoring multi-layer behavioral signals through a secure AWS EC2 gateway, Coadex identifies suspicious patterns (like ChatGPT usage, browser switching, and rapid query bursts) without invasive deep packet inspection.
 
-## Architecture
+---
 
-- **Candidate Client**: Electron-based desktop app for session management and OS-level monitoring.
-- **Backend (Gateway)**: FastAPI-based gateway on AWS EC2 managing WireGuard tunnels and metadata collection.
-- **Enrichment Pipeline**: Multi-stage classification (Rule-based -> SQLite Cache -> Sarvam-2B AI).
-- **Anomaly Engine**: Statistical behavioral analysis (EMA-based bursts, rapid query detection).
+## 🚀 The Mission
+Modern remote interviews are plagued by AI-overlay tools and "proxy" interviewers. Coadex solves this by creating a **Behavioral Intelligence Fingerprint** of the candidate, ensuring the person being interviewed is the one providing the answers.
 
-## Tech Stack
-- **Backend**: Python 3.11, FastAPI, SQLite
-- **Networking**: WireGuard, PyShark/TShark
-- **AI**: Sarvam-2B (Adaptive Domain Classification)
-- **Deployment**: AWS EC2 (t3.micro)
+---
 
-## Setup & Deployment
+## 🏗️ System Architecture
 
-1. **Clone and Configure**:
-   ```bash
-   git clone <repo-url>
-   cd Coadex-2.0
-   cp .env.example .env
-   # Edit .env with your keys
-   ```
+### 1. **Candidate Client (Desktop App)**
+*   **Electron-based**: A secure desktop environment that manages the session.
+*   **Hardware Isolation**: Monitors OS-level events (clipboard, tab switches, process blacklists) that browser-only solutions cannot see.
 
-2. **Automated Setup (Ubuntu 22.04)**:
-   ```bash
-   chmod +x setup.sh
-   ./setup.sh
-   ```
+### 2. **Backend Intelligence Gateway (AWS EC2)**
+*   **Traffic Interception**: Uses a high-performance `FastAPI` gateway.
+*   **DNS/SNI Analysis**: Leverages `PyShark`/`TShark` to capture network metadata in real-time.
+*   **Enrichment Pipeline**: 
+    1.  **Rule-based**: Instant classification of common domains.
+    2.  **Intelligence DB**: SQLite-backed local cache for rapid lookups.
+    3.  **AI Enrichment**: Deep categorization using the **Sarvam AI** model for unknown/suspicious traffic.
 
-3. **Run Backend**:
-   ```bash
-   source venv/bin/activate
-   python3 backend/api/main.py
-   ```
+### 3. **Anomaly Engine**
+*   **EMA Bursts**: Detects rapid, non-human query patterns using Exponential Moving Averages.
+*   **Behavioral Correlation**: Flags suspicious overlaps (e.g., a tab switch followed by a massive clipboard paste).
 
-4. **Run DNS Monitor**:
-   ```bash
-   sudo venv/bin/python3 backend/monitor_v3.py
-   ```
+---
 
-## Repository Structure
-- `backend/`: Core logic, API, and monitoring modules.
-- `docs/`: Architecture, implementation, and research notes.
-- `tests/`: Unit and integration tests.
-- `requirements.txt`: Python dependencies.
-- `setup.sh`: Deployment automation.
+## 🛠️ Tech Stack
+*   **Core**: Python 3.12, FastAPI
+*   **Networking**: WireGuard (Session Tunnels), PyShark, TShark
+*   **AI/ML**: Sarvam-m (LLM Enrichment), Scikit-Learn (Anomaly Detection)
+*   **Database**: SQLite (Encrypted Event Storage)
+*   **Infrastructure**: AWS EC2 (Ubuntu 22.04), t3.micro
 
-## Roadmap
-- [x] Chunk 1: Infrastructure & Tunnel Setup
-- [x] Chunk 2: Network Monitoring & Logging
-- [x] Chunk 3: Intelligent Domain Enrichment
-- [ ] Chunk 4: Behavioral Anomaly Engine
-- [ ] Chunk 5: Electron Desktop Client
-- [ ] Chunk 6: Reviewer Dashboard
+---
+
+## 📂 Repository Structure
+*   `backend/api/`: FastAPI endpoints for session lifecycle.
+*   `backend/dns_monitor/`: Robust packet capture and field-introspection logic.
+*   `backend/enrichment/`: AI-powered domain classification and Sarvam integration.
+*   `backend/intelligence/`: Persistent intelligence database and historical logging.
+*   `backend/anomaly_engine/`: Statistical behavioral analysis modules.
+
+---
+
+## 🏁 Quick Start (Judges)
+
+### 1. Requirements
+*   Ubuntu 22.04 (Recommended)
+*   Python 3.10+
+*   TShark (`sudo apt install tshark`)
+
+### 2. Live Monitoring Setup
+```bash
+# 1. Install Dependencies
+chmod +x setup.sh
+./setup.sh
+
+# 2. Configure Environment
+cp .env.example .env
+# Add your SARVAM_API_KEY and WireGuard keys
+
+# 3. Start the Enhanced Orchestrator
+# This starts the Capture -> Categorizer -> AI Enrichment pipeline
+sudo venv/bin/python3 backend/monitor_v3.py
+```
+
+---
+
+## 📈 Roadmap
+- [x] **Phase 1**: AWS Infrastructure & WireGuard Tunneling
+- [x] **Phase 2**: Multi-version Robust DNS Capture (PyShark Fixes)
+- [x] **Phase 3**: AI Enrichment Pipeline with Sarvam AI
+- [ ] **Phase 4**: Electron Desktop App Integration
+- [ ] **Phase 5**: Reviewer Interactive Dashboard
+
+---
+*Built for the next generation of honest hiring.*
