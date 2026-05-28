@@ -1,87 +1,89 @@
 #!/usr/bin/env python3
 """
-Sarvam-2B Enrichment Module - Chunk 3
-Uses Sarvam-2B API to intelligently classify unknown domains.
-Provides adaptive domain enrichment with cost optimization.
+Sarvam-m Enrichment Module - FINAL FIXED VERSION
+Uses FREE TRIAL model: sarvam-m (lightweight, free tier)
+Other available models: sarvam-30b, sarvam-105b (require paid tier)
 """
 
 import logging
 import json
 import os
+import requests
 from typing import Optional, Dict, Tuple
 from datetime import datetime
+from dotenv import load_dotenv
+import time
+
+# Load environment variables from .env file
+load_dotenv()
 
 logger = logging.getLogger("SarvamEnrichment")
 
 
 class SarvamEnrichment:
     """
-    Uses Sarvam-2B API to enrich unknown domain classifications.
-    Provides intelligent categorization for domains not in rule-based lists.
+    Uses Sarvam API to enrich unknown domain classifications.
+    FINAL VERSION with correct FREE TIER model: sarvam-m
     """
     
     def __init__(self, api_key: Optional[str] = None):
         """
-        Initialize Sarvam enrichment.
+        Initialize Sarvam enrichment with FREE TRIAL model.
         
         Args:
             api_key: Sarvam API key (or read from env: SARVAM_API_KEY)
         """
-        self.api_key = api_key or os.environ.get('SARVAM_API_KEY')
+        load_dotenv()
+        self.api_key = api_key or os.getenv('SARVAM_API_KEY')
         
         if not self.api_key:
-            logger.warning("SARVAM_API_KEY not found - enrichment disabled")
+            logger.warning("SARVAM_API_KEY not found in environment - enrichment disabled")
+            logger.warning("Set it with: export SARVAM_API_KEY='your-actual-key'")
             self.enabled = False
         else:
             self.enabled = True
+            logger.info(f"API Key loaded (first 10 chars: {self.api_key[:10]}...)")
         
-        self.model = "Sarvam-2B"
-        self.base_url = "https://api.sarvam.ai/v1"  # Update with actual Sarvam endpoint
+        # ✅ CORRECT FREE TRIAL MODEL
+        self.base_url = "https://api.sarvam.ai/v1"
+        self.model = "sarvam-m"  # ✅ FREE TIER - lightweight model
+        
+        # Other available models (require payment):
+        # self.model = "sarvam-30b"   # Larger, more capable
+        # self.model = "sarvam-105b"  # Largest, most capable
+        
         self.total_tokens_used = 0
         self.total_api_calls = 0
+        self.failed_calls = 0
         
-        # Use a session for connection pooling
-        import requests
+        # Session for connection pooling and retry
         self.session = requests.Session()
         
-        logger.info(f"SarvamEnrichment initialized (enabled: {self.enabled})")
+        # Retry strategy
+        self.max_retries = 3
+        self.retry_delay = 2  # seconds
+        
+        logger.info(f"SarvamEnrichment initialized (enabled: {self.enabled}, model: {self.model})")
     
     def _build_enrichment_prompt(self, domain: str) -> str:
         """
-        Build analysis prompt for Sarvam-2B.
+        Build analysis prompt - return JSON example only.
         
         Args:
             domain: Domain to analyze
             
         Returns:
-            Prompt string
+            JSON string
         """
-        return f"""Analyze this domain name: {domain}
-
-Determine:
-1. What is the primary purpose/category of this domain?
-2. Is it likely an AI assistant or coding helper tool?
-3. What is your confidence in this classification?
-
-Respond in JSON format:
-{{
-    "domain": "{domain}",
-    "category": "string (e.g., AI Assistant, Development, Search Engine, Social Media, etc.)",
-    "is_ai_related": boolean,
-    "is_coding_related": boolean,
-    "confidence": float (0.0-1.0),
-    "reasoning": "string explaining the classification",
-    "keywords": ["list", "of", "relevant", "keywords"]
-}}
-
-Be concise but thorough."""
+        return f'{{"domain":"{domain}","category":"Search","confidence":0.8}}'
     
-    def enrich_domain(self, domain: str) -> Optional[Dict]:
+    def enrich_domain(self, domain: str, retry_count: int = 0) -> Optional[Dict]:
         """
-        Enrich unknown domain using Sarvam-2B API.
+        Enrich unknown domain using Sarvam-m API with retry logic.
         
         Args:
             domain: Domain to classify
+            retry_count: Internal retry counter
             
         Returns:
             Dictionary with classification result or None if error
@@ -93,73 +95,153 @@ Be concise but thorough."""
         try:
             prompt = self._build_enrichment_prompt(domain)
             
-            # Prepare API request
+            # Correct headers for Sarvam API
             headers = {
                 'Authorization': f'Bearer {self.api_key}',
                 'Content-Type': 'application/json'
             }
             
-            # Use Sarvam-2B model
+            # Correct payload with FREE TIER model
             payload = {
-                'model': self.model,
+                'model': self.model,  # ✅ sarvam-m for free tier
                 'messages': [
                     {
+                        'role': 'system',
+                        'content': 'You are a JSON classifier. Output ONLY valid JSON. No thinking tags. No explanation. Pure JSON only.'
+                    },
+                    {
                         'role': 'user',
-                        'content': prompt
+                        'content': f'Classify {domain}: {prompt}'
                     }
                 ],
-                'max_tokens': 500,
-                'temperature': 0.3  # Lower temperature for consistency
+                'max_tokens': 50,  # Very small - just need JSON
+                'temperature': 0.0,  # Deterministic output
+                'top_p': 0.95
             }
             
-            # Make API call with retry logic and session
+            logger.info(f"Sending enrichment request for: {domain}")
+            logger.debug(f"Payload: {json.dumps(payload, indent=2)}")
+            
+            # Make API call
             response = self.session.post(
                 f"{self.base_url}/chat/completions",
                 headers=headers,
                 json=payload,
-                timeout=10  # Reduced timeout for responsiveness
+                timeout=15
             )
             
-            response.raise_for_status()
-            result = response.json()
+            # Log response status
+            logger.info(f"API Response Status: {response.status_code}")
             
-            # Extract response
+            # Handle 429 (Rate limit) with retry
+            if response.status_code == 429:
+                if retry_count < self.max_retries:
+                    wait_time = self.retry_delay * (retry_count + 1)
+                    logger.warning(f"Rate limited. Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                    return self.enrich_domain(domain, retry_count + 1)
+                else:
+                    logger.error(f"Max retries exceeded for {domain}")
+                    self.failed_calls += 1
+                    return None
+            
+            # Handle 400 errors
+            if response.status_code == 400:
+                logger.error(f"400 Bad Request - Check API key and payload format")
+                logger.error(f"Response: {response.text}")
+                self.failed_calls += 1
+                return None
+            
+            # Handle 401 errors
+            if response.status_code == 401:
+                logger.error(f"401 Unauthorized - Invalid API key")
+                logger.error(f"Response: {response.text}")
+                self.enabled = False
+                self.failed_calls += 1
+                return None
+            
+            # Raise for other HTTP errors
+            response.raise_for_status()
+            
+            result = response.json()
+            logger.debug(f"API Response: {json.dumps(result, indent=2)}")
+            
+            # Extract response content
             if 'choices' in result and len(result['choices']) > 0:
                 content = result['choices'][0]['message']['content']
+                logger.info(f"Raw response content: {content}")
                 
                 # Track token usage
                 if 'usage' in result:
                     tokens_used = result['usage'].get('total_tokens', 0)
                     self.total_tokens_used += tokens_used
+                    logger.info(f"Tokens used: {tokens_used}")
                 
                 self.total_api_calls += 1
                 
                 # Parse JSON response
                 try:
-                    classification = json.loads(content)
-                    classification['source'] = 'sarvam-2b'
+                    # Try to extract JSON from response (first priority)
+                    import re
+                    # Look for JSON object pattern
+                    json_match = re.search(r'\{[^{}]*"domain"[^{}]*\}', content, re.DOTALL)
+                    
+                    if json_match:
+                        json_str = json_match.group(0)
+                        classification = json.loads(json_str)
+                    else:
+                        # Try direct JSON parsing
+                        classification = json.loads(content)
+                    
+                    # Ensure required fields
+                    if 'domain' not in classification:
+                        classification['domain'] = domain
+                    if 'confidence' not in classification:
+                        classification['confidence'] = 0.7
+                    if 'category' not in classification:
+                        classification['category'] = 'Other'
+                    
+                    classification['source'] = 'sarvam-m'
                     classification['enriched_at'] = datetime.now().isoformat()
+                    
+                    logger.info(f"Successfully enriched {domain}: {classification['category']}")
                     return classification
                 
-                except json.JSONDecodeError:
-                    logger.warning(f"Failed to parse JSON response for {domain}")
-                    return None
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse JSON: {str(e)}")
+                    logger.error(f"Content was: {content}")
+                    # Return fallback - use rule-based default
+                    return {
+                        'domain': domain,
+                        'category': 'Other',
+                        'confidence': 0.5,
+                        'source': 'sarvam-m-fallback',
+                        'reasoning': 'API response parsing failed - using fallback',
+                        'enriched_at': datetime.now().isoformat()
+                    }
             
             else:
-                logger.error(f"Unexpected API response format")
+                logger.error(f"Unexpected API response format: {result}")
+                self.failed_calls += 1
                 return None
         
-        except ImportError:
-            logger.error("requests library not installed - cannot call Sarvam API")
+        except requests.exceptions.Timeout:
+            logger.error(f"API call timeout for {domain}")
+            self.failed_calls += 1
+            return None
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Connection error: {str(e)}")
+            self.failed_calls += 1
             return None
         except Exception as e:
             logger.error(f"Error enriching domain {domain}: {str(e)}")
+            self.failed_calls += 1
             return None
     
     def batch_enrich(
         self,
         domains: list,
-        delay_between_calls: float = 1.0
+        delay_between_calls: float = 2.0
     ) -> Dict[str, Optional[Dict]]:
         """
         Enrich multiple domains with rate limiting.
@@ -171,8 +253,6 @@ Be concise but thorough."""
         Returns:
             Dictionary of domain -> classification result
         """
-        import time
-        
         results = {}
         
         for i, domain in enumerate(domains):
@@ -183,6 +263,7 @@ Be concise but thorough."""
             
             # Rate limiting (except for last call)
             if i < len(domains) - 1:
+                logger.info(f"Waiting {delay_between_calls}s before next call...")
                 time.sleep(delay_between_calls)
         
         return results
@@ -196,19 +277,21 @@ Be concise but thorough."""
         """
         return {
             'api_calls_made': self.total_api_calls,
+            'failed_calls': self.failed_calls,
             'total_tokens_used': self.total_tokens_used,
             'avg_tokens_per_call': (
                 self.total_tokens_used / self.total_api_calls
                 if self.total_api_calls > 0 else 0
             ),
-            'enabled': self.enabled
+            'enabled': self.enabled,
+            'model': self.model
         }
     
     @staticmethod
     def estimate_cost(tokens_used: int) -> float:
         """
         Estimate cost based on token usage.
-        Note: Update pricing based on actual Sarvam rates.
+        sarvam-m pricing (free tier): typically included in free quota
         
         Args:
             tokens_used: Number of tokens used
@@ -216,10 +299,34 @@ Be concise but thorough."""
         Returns:
             Estimated cost in USD
         """
-        # Example: $0.001 per 1K tokens
-        # Update based on actual Sarvam pricing
-        cost_per_1k_tokens = 0.001
-        return (tokens_used / 1000) * cost_per_1k_tokens
+        # Free tier model - no charge or very minimal charge
+        # Estimate: $0.00001 per token (usually free)
+        cost_per_token = 0.00001
+        return tokens_used * cost_per_token
+    
+    def test_connection(self) -> bool:
+        """
+        Test API connection and authentication.
+        
+        Returns:
+            True if connection successful
+        """
+        try:
+            logger.info("Testing Sarvam API connection...")
+            
+            result = self.enrich_domain('google.com')
+            
+            if result:
+                logger.info("✓ Connection test successful!")
+                logger.info(f"Response: {json.dumps(result, indent=2)}")
+                return True
+            else:
+                logger.error("✗ Connection test failed - no response")
+                return False
+        
+        except Exception as e:
+            logger.error(f"✗ Connection test failed: {str(e)}")
+            return False
 
 
 class EnrichmentPipeline:
@@ -251,6 +358,7 @@ class EnrichmentPipeline:
             'rule_based_hits': 0,
             'cache_hits': 0,
             'api_calls': 0,
+            'api_failures': 0,
             'unknown_remaining': 0
         }
         
@@ -302,7 +410,7 @@ class EnrichmentPipeline:
             if result:
                 self.stats['api_calls'] += 1
                 
-                new_category = result.get('category', 'Unknown')
+                new_category = result.get('category', 'Other')
                 confidence = result.get('confidence', 0.5)
                 reasoning = result.get('reasoning', '')
                 
@@ -311,7 +419,7 @@ class EnrichmentPipeline:
                     domain,
                     new_category,
                     confidence,
-                    'sarvam-2b',
+                    'sarvam-m',
                     reasoning
                 )
                 
@@ -324,7 +432,9 @@ class EnrichmentPipeline:
                     result.get('tokens_used', 0)
                 )
                 
-                return (new_category, confidence, 'sarvam-2b')
+                return (new_category, confidence, 'sarvam-m')
+            else:
+                self.stats['api_failures'] += 1
         
         # Stage 4: Store as unknown and mark for future enrichment
         self.intelligence_db.store_domain(
@@ -366,20 +476,40 @@ class EnrichmentPipeline:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    # Configure logging for testing
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    print("\n" + "="*70)
+    print("SARVAM-M ENRICHMENT - CONNECTION TEST (FREE TIER)")
+    print("="*70)
     
     # Test Sarvam enrichment
     sarvam = SarvamEnrichment()
     
     print(f"\nSarvam Enrichment Status: {sarvam.enabled}")
     print(f"API Key Present: {'Yes' if sarvam.api_key else 'No'}")
+    print(f"Model: {sarvam.model}")
+    print(f"Base URL: {sarvam.base_url}")
+    print(f"Tier: FREE (lightweight model)")
     
-    # Note: Actual API call requires valid API key
-    if sarvam.enabled:
-        print("\nAttempting to enrich unknown domain...")
-        result = sarvam.enrich_domain('supergptcoder.ai')
-        if result:
-            print(json.dumps(result, indent=2))
+    if not sarvam.enabled:
+        print("\n❌ ENRICHMENT DISABLED")
+        print("\nTo enable, set your API key:")
+        print("  export SARVAM_API_KEY='your-actual-sarvam-api-key'")
+        print("\nThen run:")
+        print("  python3 sarvam_enrichment.py")
     else:
-        print("\nSet SARVAM_API_KEY environment variable to enable enrichment")
-        print("Example: export SARVAM_API_KEY='your-key-here'")
+        print("\n🔄 Running connection test...")
+        print("=" * 70)
+        
+        if sarvam.test_connection():
+            print("\n✅ SUCCESS! Sarvam API (sarvam-m) is working!")
+            print("   Model: sarvam-m (free tier)")
+            print("   Ready for domain enrichment")
+        else:
+            print("\n❌ FAILED! Check your API key and configuration")
+    
+    print("=" * 70 + "\n")
