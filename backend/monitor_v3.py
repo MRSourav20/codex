@@ -25,6 +25,7 @@ from backend.enrichment.dns_categorizer_v2 import DomainCategorizer
 from backend.anomaly_engine.dns_event_detector import SuspiciousEventDetector
 from backend.intelligence.domain_intelligence_db import DomainIntelligenceDB
 from backend.enrichment.Sarvam_enrichment import SarvamEnrichment, EnrichmentPipeline
+from backend.session_manager import SessionManager
 
 # Configure logging
 logging.basicConfig(
@@ -79,6 +80,7 @@ class EnhancedMonitoringOrchestrator:
         self.categorizer = DomainCategorizer()
         self.intelligence_db = DomainIntelligenceDB()
         self.sarvam = SarvamEnrichment() if enable_enrichment else None
+        self.session_manager = SessionManager()
         
         # Create enrichment pipeline
         self.enrichment_pipeline = EnrichmentPipeline(
@@ -106,14 +108,22 @@ class EnhancedMonitoringOrchestrator:
         
         logger.info("Enhanced orchestrator initialized successfully")
     
-    def _process_domain(self, domain: str, timestamp: str):
+    def _process_domain(self, domain: str, timestamp: str, src_ip: Optional[str] = None):
         """
         Process domain through complete enrichment pipeline.
         
         Args:
             domain: Domain name
             timestamp: ISO format timestamp
+            src_ip: Source IP for session mapping
         """
+        # Session mapping
+        session_id = None
+        if src_ip:
+            session = self.session_manager.get_session_by_ip(src_ip)
+            if session:
+                session_id = session[0]
+                
         # Enrich through pipeline
         category, confidence, source = self.enrichment_pipeline.enrich(domain)
         
@@ -132,9 +142,11 @@ class EnhancedMonitoringOrchestrator:
         self.logger.log_dns_query(
             domain=domain,
             timestamp=timestamp,
+            source_ip=src_ip,
             category=category,
             source=source,
-            confidence=confidence
+            confidence=confidence,
+            session_id=session_id
         )
         
         # Detect events
@@ -147,7 +159,8 @@ class EnhancedMonitoringOrchestrator:
                 count=event.get('count', 1),
                 first_seen=timestamp,
                 last_seen=timestamp,
-                details=event.get('details')
+                details=event.get('details'),
+                session_id=session_id
             )
             
             self.stats['events_generated'] += 1
@@ -192,11 +205,14 @@ class EnhancedMonitoringOrchestrator:
                 self.capture.packet_count += 1
                 
                 # Extract domains
-                domains = self.capture._extract_dns_domains(packet)
+                extracted_data = self.capture._extract_dns_domains(packet)
                 
-                for domain in domains:
+                for item in extracted_data:
+                    domain = item['domain']
+                    src_ip = item['src_ip']
+                    
                     # Skip duplicates
-                    if self.capture._is_duplicate(domain):
+                    if self.capture._is_duplicate(domain, src_ip):
                         continue
                     
                     self.capture.domain_count += 1
@@ -213,10 +229,11 @@ class EnhancedMonitoringOrchestrator:
                         'Unknown': '❓'
                     }.get(source, '💾')
                     
-                    print(f"[{time_str}] {source_indicator} {domain:40} {category:20} (conf: {confidence:.2f})")
+                    src_ip_str = f"[{src_ip}] " if src_ip else ""
+                    print(f"[{time_str}] {src_ip_str}{source_indicator} {domain:40} {category:20} (conf: {confidence:.2f})")
                     
                     # Process through pipeline
-                    self._process_domain(domain, timestamp)
+                    self._process_domain(domain, timestamp, src_ip)
         
         except PermissionError:
             logger.error("ERROR: Requires root/sudo privileges")

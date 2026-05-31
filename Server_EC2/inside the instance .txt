@@ -1,0 +1,2407 @@
+Dns capture · PY
+
+
+#!/usr/bin/env python3
+"""
+DNS Packet Capture Module - Chunk 2 Implementation
+Captures live DNS packets on AWS EC2 gateway using pyshark/tshark.
+Runs independently to verify metadata observation works.
+"""
+
+import pyshark
+import signal
+import sys
+import time
+from datetime import datetime
+from collections import deque
+from typing import Optional, Set
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("DNSCapture")
+
+
+class DNSPacketCapture:
+    """
+    Captures DNS packets on EC2 gateway.
+    Provides:
+    - Real-time DNS domain extraction
+    - Timestamp logging
+    - Packet counting
+    - Duplicate filtering
+    - Graceful shutdown support
+    """
+    
+    def __init__(
+        self,
+        interface: str = 'any',
+        duplicate_window_seconds: int = 5
+    ):
+        """
+        Initialize DNS packet capture.
+        
+        Args:
+            interface: Network interface to monitor ('any' for all)
+            duplicate_window_seconds: Time window for duplicate filtering
+        """
+        self.interface = interface
+        self.duplicate_window_seconds = duplicate_window_seconds
+        
+        # Tracking
+        self.packet_count = 0
+        self.domain_count = 0
+        self.start_time = datetime.now()
+        self.running = True
+        self.recent_domains: deque = deque(maxlen=1000)
+        
+        # For duplicate filtering
+        self.domain_timestamps: dict = {}
+        
+        # Statistics
+        self.error_count = 0
+        self.malformed_count = 0
+        
+        # Setup signal handlers for graceful shutdown
+        signal.signal(signal.SIGINT, self._handle_shutdown)
+        signal.signal(signal.SIGTERM, self._handle_shutdown)
+        
+        logger.info(f"DNSCapture initialized - Interface: {interface}")
+    
+    def _handle_shutdown(self, signum, frame):
+        """Handle graceful shutdown on SIGINT/SIGTERM."""
+        logger.info("\n\nShutdown signal received. Cleaning up...")
+        self.running = False
+        self._print_statistics()
+        sys.exit(0)
+    
+    def _is_duplicate(self, domain: str) -> bool:
+        """
+        Check if domain was recently seen (within duplicate_window_seconds).
+        
+        Args:
+            domain: Domain name to check
+            
+        Returns:
+            True if domain is recent duplicate, False otherwise
+        """
+        now = time.time()
+        
+        if domain in self.domain_timestamps:
+            last_seen = self.domain_timestamps[domain]
+            if (now - last_seen) < self.duplicate_window_seconds:
+                return True
+        
+        self.domain_timestamps[domain] = now
+        return False
+    
+    def _sanitize_domain(self, domain: str) -> Optional[str]:
+        """
+        Sanitize and validate domain name.
+        
+        Args:
+            domain: Raw domain from packet
+            
+        Returns:
+            Cleaned domain or None if invalid
+        """
+        if not domain:
+            return None
+        
+        # Remove trailing dots from FQDN
+        domain = domain.rstrip('.')
+        
+        # Skip empty or localhost queries
+        if not domain or domain == 'localhost':
+            return None
+        
+        # Skip multicast/mDNS queries
+        if domain.endswith('.local') or domain.endswith('.arpa'):
+            return None
+        
+        return domain.lower()
+    
+    def _extract_dns_domains(self, packet) -> list:
+        """
+        Extract DNS queried domains from packet.
+        Handles malformed packets gracefully.
+        
+        Args:
+            packet: pyshark packet object
+            
+        Returns:
+            List of domain names
+        """
+        domains = []
+        
+        try:
+            if hasattr(packet, 'dns'):
+                dns_layer = packet.dns
+                
+                # Access DNS query names
+                if hasattr(dns_layer, 'qry_name'):
+                    # Single query or list of queries
+                    qry_names = dns_layer.qry_name
+                    
+                    if isinstance(qry_names, str):
+                        qry_names = [qry_names]
+                    
+                    for name in qry_names:
+                        sanitized = self._sanitize_domain(name)
+                        if sanitized:
+                            domains.append(sanitized)
+        
+        except AttributeError as e:
+            self.malformed_count += 1
+            logger.debug(f"Malformed DNS packet: {str(e)}")
+        except Exception as e:
+            self.error_count += 1
+            logger.error(f"Error extracting DNS domain: {str(e)}")
+        
+        return domains
+    
+    def _print_packet_info(self, domain: str, timestamp: str):
+        """
+        Print captured domain in real-time format.
+        
+        Args:
+            domain: Domain name
+            timestamp: ISO format timestamp
+        """
+        time_str = datetime.fromisoformat(timestamp).strftime('%H:%M:%S')
+        print(f"[{time_str}] {domain}")
+    
+    def _print_statistics(self):
+        """Print session statistics."""
+        elapsed = datetime.now() - self.start_time
+        print("\n" + "="*60)
+        print("DNS CAPTURE SESSION STATISTICS")
+        print("="*60)
+        print(f"Duration: {elapsed}")
+        print(f"Total Packets Processed: {self.packet_count}")
+        print(f"Unique Domains Captured: {self.domain_count}")
+        print(f"Malformed Packets: {self.malformed_count}")
+        print(f"Errors: {self.error_count}")
+        if self.packet_count > 0:
+            print(f"Avg Packets/sec: {self.packet_count / elapsed.total_seconds():.2f}")
+        print("="*60)
+    
+    def start_capture(self):
+        """
+        Start live DNS packet capture.
+        Runs continuously until shutdown signal received.
+        """
+        print("\n" + "="*60)
+        print("DNS PACKET CAPTURE - CHUNK 2 MVP")
+        print("="*60)
+        print(f"Interface: {self.interface}")
+        print(f"Display Filter: dns")
+        print(f"Duplicate Window: {self.duplicate_window_seconds}s")
+        print("Listening for DNS traffic (Ctrl+C to stop)...\n")
+        
+        try:
+            capture = pyshark.LiveCapture(
+                interface=self.interface,
+                display_filter='dns'
+            )
+            
+            for packet in capture.sniff_continuously():
+                if not self.running:
+                    break
+                
+                self.packet_count += 1
+                
+                # Extract domains from this packet
+                domains = self._extract_dns_domains(packet)
+                
+                for domain in domains:
+                    # Skip duplicates
+                    if self._is_duplicate(domain):
+                        continue
+                    
+                    self.domain_count += 1
+                    timestamp = datetime.now().isoformat()
+                    
+                    # Store in memory
+                    self.recent_domains.append({
+                        'domain': domain,
+                        'timestamp': timestamp
+                    })
+                    
+                    # Print real-time
+                    self._print_packet_info(domain, timestamp)
+        
+        except PermissionError:
+            logger.error("ERROR: This script requires root/sudo privileges to capture packets.")
+            logger.error("Run with: sudo python3 dns_capture.py")
+            sys.exit(1)
+        except KeyboardInterrupt:
+            self._handle_shutdown(None, None)
+        except Exception as e:
+            logger.error(f"Fatal error in packet capture: {str(e)}")
+            self._print_statistics()
+            sys.exit(1)
+    
+    def get_recent_domains(self, limit: int = 100) -> list:
+        """
+        Get recently captured domains.
+        
+        Args:
+            limit: Maximum number of domains to return
+            
+        Returns:
+            List of domain metadata dicts
+        """
+        return list(self.recent_domains)[-limit:]
+
+
+if __name__ == "__main__":
+    # Main entry point
+    capture = DNSPacketCapture(interface='any')
+    capture.start_capture()
+
+
+
+
+
+
+Dns categorizer · PY
+
+
+
+#!/usr/bin/env python3
+"""
+Domain Categorization Module - Chunk 2 Implementation
+Categorizes observed domains using lightweight rule-based logic.
+NO machine learning - simple string matching and domain analysis.
+"""
+
+import logging
+from typing import Optional, Dict, Set
+from enum import Enum
+
+logger = logging.getLogger("DomainCategorizer")
+
+
+class DomainCategory(Enum):
+    """Domain category enumeration."""
+    AI_ASSISTANT = "AI Assistant"
+    DEVELOPMENT = "Development"
+    SOCIAL_MEDIA = "Social Media"
+    VIDEO_STREAMING = "Video Streaming"
+    SEARCH_ENGINE = "Search Engine"
+    CLOUD_SERVICES = "Cloud Services"
+    COMMUNICATION = "Communication"
+    SHOPPING = "Shopping"
+    BANKING = "Banking"
+    UNKNOWN = "Unknown"
+
+
+class DomainCategorizer:
+    """
+    Categorizes domains using rule-based patterns.
+    Lightweight, deterministic, no ML.
+    """
+    
+    def __init__(self):
+        """Initialize categorizer with domain rules."""
+        self.rules = self._initialize_rules()
+        logger.info("DomainCategorizer initialized with rule-based classification")
+    
+    def _initialize_rules(self) -> Dict[DomainCategory, Set[str]]:
+        """
+        Initialize domain categorization rules.
+        Each category maps to keywords/domains that match it.
+        
+        Returns:
+            Dictionary of category -> set of keywords
+        """
+        return {
+            DomainCategory.AI_ASSISTANT: {
+                'chat.openai.com',
+                'openai.com',
+                'claude.ai',
+                'anthropic.com',
+                'gemini.google.com',
+                'bard.google.com',
+                'google.com/bard',
+                'chatgpt',
+                'gpt-4',
+                'huggingface.co',
+                'replicate.com',
+                'perplexity.ai',
+                'mistral.ai',
+                'cohere.com'
+            },
+            DomainCategory.DEVELOPMENT: {
+                'github.com',
+                'gitlab.com',
+                'bitbucket.org',
+                'stackoverflow.com',
+                'stackoverflow.co',
+                'dev.to',
+                'npm.com',
+                'npmjs.com',
+                'npmjs.org',
+                'pypi.org',
+                'crates.io',
+                'maven.org',
+                'docker.com',
+                'kubernetes.io',
+                'rust-lang.org',
+                'python.org',
+                'nodejs.org',
+                'go.dev',
+                'rust.rustup.rs',
+                'cran.r-project.org',
+                'cpan.org'
+            },
+            DomainCategory.SOCIAL_MEDIA: {
+                'facebook.com',
+                'instagram.com',
+                'twitter.com',
+                'x.com',
+                'tiktok.com',
+                'snapchat.com',
+                'linkedin.com',
+                'reddit.com',
+                'tumblr.com',
+                'pinterest.com',
+                'telegram.org',
+                'whatsapp.com',
+                'discord.com',
+                'slack.com'
+            },
+            DomainCategory.VIDEO_STREAMING: {
+                'youtube.com',
+                'youtu.be',
+                'netflix.com',
+                'twitch.tv',
+                'vimeo.com',
+                'dailymotion.com',
+                'hulu.com',
+                'disneyplus.com'
+            },
+            DomainCategory.SEARCH_ENGINE: {
+                'google.com',
+                'bing.com',
+                'yahoo.com',
+                'duckduckgo.com',
+                'baidu.com',
+                'yandex.com'
+            },
+            DomainCategory.CLOUD_SERVICES: {
+                'aws.amazon.com',
+                'azure.microsoft.com',
+                'cloud.google.com',
+                'heroku.com',
+                'digitalocean.com',
+                'linode.com',
+                'vultr.com'
+            },
+            DomainCategory.COMMUNICATION: {
+                'gmail.com',
+                'outlook.com',
+                'mail.google.com',
+                'mailbox.org',
+                'protonmail.com',
+                'proton.me'
+            },
+            DomainCategory.SHOPPING: {
+                'amazon.com',
+                'ebay.com',
+                'etsy.com',
+                'walmart.com',
+                'target.com',
+                'shopify.com',
+                'alibaba.com'
+            },
+            DomainCategory.BANKING: {
+                'paypal.com',
+                'stripe.com',
+                'square.com',
+                'wise.com',
+                'revolut.com',
+                'crypto.com',
+                'coinbase.com'
+            }
+        }
+    
+    def categorize(self, domain: str) -> DomainCategory:
+        """
+        Categorize a domain using rule-based matching.
+        
+        Args:
+            domain: Domain name to categorize
+            
+        Returns:
+            DomainCategory enum value
+        """
+        domain_lower = domain.lower()
+        
+        # Exact match
+        for category, keywords in self.rules.items():
+            if domain_lower in keywords:
+                return category
+        
+        # Partial match (subdomain or parent domain)
+        domain_parts = domain_lower.split('.')
+        
+        for category, keywords in self.rules.items():
+            # Check if any keyword is contained in or contains domain
+            for keyword in keywords:
+                keyword_parts = keyword.split('.')
+                
+                # Check for subdomain match (e.g., api.github.com contains github.com)
+                if len(domain_parts) >= len(keyword_parts):
+                    if domain_lower.endswith(keyword):
+                        return category
+                
+                # Check for domain match (e.g., github.com matches api.github.com)
+                if keyword.endswith(domain_lower):
+                    return category
+        
+        return DomainCategory.UNKNOWN
+    
+    def get_suspicious_domains(self) -> Set[str]:
+        """
+        Get set of known AI assistant domains for quick suspicious detection.
+        
+        Returns:
+            Set of AI assistant domain keywords
+        """
+        return self.rules[DomainCategory.AI_ASSISTANT]
+    
+    def is_ai_assistant(self, domain: str) -> bool:
+        """
+        Quick check if domain is AI assistant.
+        
+        Args:
+            domain: Domain to check
+            
+        Returns:
+            True if AI assistant domain
+        """
+        return self.categorize(domain) == DomainCategory.AI_ASSISTANT
+    
+    def categorize_batch(self, domains: list) -> Dict[str, str]:
+        """
+        Categorize multiple domains.
+        
+        Args:
+            domains: List of domain names
+            
+        Returns:
+            Dictionary of domain -> category
+        """
+        return {
+            domain: self.categorize(domain).value
+            for domain in domains
+        }
+    
+    def get_category_stats(self, domains: list) -> Dict[str, int]:
+        """
+        Get category distribution for domain list.
+        
+        Args:
+            domains: List of domain names
+            
+        Returns:
+            Dictionary of category -> count
+        """
+        stats = {category.value: 0 for category in DomainCategory}
+        
+        for domain in domains:
+            category = self.categorize(domain)
+            stats[category.value] += 1
+        
+        # Remove zero-count categories
+        return {k: v for k, v in stats.items() if v > 0}
+
+
+if __name__ == "__main__":
+    # Test categorizer
+    logging.basicConfig(level=logging.INFO)
+    
+    categorizer = DomainCategorizer()
+    
+    # Test domains
+    test_domains = [
+        'google.com',
+        'github.com',
+        'chat.openai.com',
+        'youtube.com',
+        'api.github.com',
+        'api.anthropic.com',
+        'unknown-domain.xyz'
+    ]
+    
+    print("\n" + "="*60)
+    print("DOMAIN CATEGORIZATION TEST")
+    print("="*60)
+    
+    for domain in test_domains:
+        category = categorizer.categorize(domain)
+        is_ai = categorizer.is_ai_assistant(domain)
+        print(f"{domain:30} -> {category.value:20} (AI: {is_ai})")
+    
+    print("\nCategory Distribution:")
+    stats = categorizer.get_category_stats(test_domains)
+    for category, count in stats.items():
+        print(f"  {category:20} {count}")
+    
+    print("\n" + "="*60)
+
+
+Dns event detector · PY
+
+
+#!/usr/bin/env python3
+"""
+Suspicious Event Detection Module - Chunk 2 Implementation
+Generates events for suspicious domain patterns (bursts, repeated AI access, etc).
+Rule-based detection with NO machine learning.
+"""
+
+import logging
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional, Tuple
+from collections import defaultdict
+from enum import Enum
+
+logger = logging.getLogger("SuspiciousEventDetector")
+
+
+class SuspiciousEventType(Enum):
+    """Types of suspicious events."""
+    AI_DOMAIN_BURST = "AI_DOMAIN_BURST"
+    BROWSING_BURST = "BROWSING_BURST"
+    REPEATED_AI_DOMAIN = "REPEATED_AI_DOMAIN"
+    SUSPICIOUS_DOMAIN = "SUSPICIOUS_DOMAIN"
+    DOMAIN_SWITCHING = "DOMAIN_SWITCHING"
+    RAPID_QUERIES = "RAPID_QUERIES"
+
+
+class SuspiciousEventDetector:
+    """
+    Detects suspicious patterns in DNS query streams.
+    Rule-based, deterministic, no ML.
+    """
+    
+    def __init__(
+        self,
+        ai_domains: set,
+        burst_threshold: int = 3,
+        burst_window_seconds: int = 10,
+        rapid_query_threshold: int = 10,
+        rapid_query_window_seconds: int = 5
+    ):
+        """
+        Initialize event detector with thresholds.
+        
+        Args:
+            ai_domains: Set of known AI assistant domains
+            burst_threshold: Min queries to trigger burst event
+            burst_window_seconds: Time window for burst detection
+            rapid_query_threshold: Min queries for rapid threshold
+            rapid_query_window_seconds: Time window for rapid queries
+        """
+        self.ai_domains = ai_domains
+        self.burst_threshold = burst_threshold
+        self.burst_window_seconds = burst_window_seconds
+        self.rapid_query_threshold = rapid_query_threshold
+        self.rapid_query_window_seconds = rapid_query_window_seconds
+        
+        # Tracking
+        self.recent_queries: List[Tuple[str, datetime]] = []
+        self.ai_domain_access: Dict[str, List[datetime]] = defaultdict(list)
+        self.domain_access_counts: Dict[str, int] = defaultdict(int)
+        
+        logger.info("SuspiciousEventDetector initialized")
+    
+    def _is_ai_domain(self, domain: str) -> bool:
+        """
+        Check if domain is in AI domain set.
+        
+        Args:
+            domain: Domain to check
+            
+        Returns:
+            True if AI domain
+        """
+        domain_lower = domain.lower()
+        
+        # Exact match
+        if domain_lower in self.ai_domains:
+            return True
+        
+        # Partial match
+        for ai_domain in self.ai_domains:
+            if domain_lower.endswith('.' + ai_domain) or domain_lower.endswith(ai_domain):
+                return True
+        
+        return False
+    
+    def _prune_old_entries(self, now: datetime):
+        """
+        Remove old entries from tracking structures.
+        
+        Args:
+            now: Current datetime
+        """
+        # Prune recent queries
+        cutoff = now - timedelta(seconds=max(
+            self.burst_window_seconds,
+            self.rapid_query_window_seconds
+        ) * 2)
+        
+        self.recent_queries = [
+            (domain, timestamp)
+            for domain, timestamp in self.recent_queries
+            if timestamp > cutoff
+        ]
+        
+        # Prune AI domain access
+        cutoff = now - timedelta(seconds=self.burst_window_seconds * 3)
+        for domain in list(self.ai_domain_access.keys()):
+            self.ai_domain_access[domain] = [
+                timestamp for timestamp in self.ai_domain_access[domain]
+                if timestamp > cutoff
+            ]
+    
+    def detect_events(
+        self,
+        domain: str,
+        timestamp: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Analyze a domain query for suspicious patterns.
+        Returns list of detected events.
+        
+        Args:
+            domain: Domain being queried
+            timestamp: ISO format timestamp (defaults to now)
+            
+        Returns:
+            List of detected event dictionaries
+        """
+        if timestamp is None:
+            now = datetime.now()
+        else:
+            now = datetime.fromisoformat(timestamp)
+        
+        events = []
+        
+        # Prune old entries
+        self._prune_old_entries(now)
+        
+        # Add to recent queries
+        self.recent_queries.append((domain, now))
+        self.domain_access_counts[domain] += 1
+        
+        # Check if AI domain
+        is_ai = self._is_ai_domain(domain)
+        
+        if is_ai:
+            self.ai_domain_access[domain].append(now)
+            
+            # Detect: Repeated AI domain access
+            ai_access_count = len(self.ai_domain_access[domain])
+            if ai_access_count >= 5:
+                events.append({
+                    'event_type': SuspiciousEventType.REPEATED_AI_DOMAIN.value,
+                    'domain': domain,
+                    'count': ai_access_count,
+                    'severity': 'MEDIUM',
+                    'details': {
+                        'reason': f'{domain} accessed {ai_access_count} times',
+                        'domain_type': 'AI Assistant'
+                    }
+                })
+            
+            # Detect: AI domain burst
+            ai_burst = self._detect_ai_burst(now)
+            if ai_burst:
+                events.append(ai_burst)
+        
+        # Detect: General browsing burst
+        burst_event = self._detect_browsing_burst(now)
+        if burst_event:
+            events.append(burst_event)
+        
+        # Detect: Rapid queries
+        rapid_event = self._detect_rapid_queries(now)
+        if rapid_event:
+            events.append(rapid_event)
+        
+        # Detect: Domain switching pattern
+        switch_event = self._detect_domain_switching(now)
+        if switch_event:
+            events.append(switch_event)
+        
+        return events
+    
+    def _detect_ai_burst(self, now: datetime) -> Optional[Dict]:
+        """
+        Detect burst of AI assistant domain access.
+        
+        Args:
+            now: Current datetime
+            
+        Returns:
+            Event dict if detected, None otherwise
+        """
+        window_start = now - timedelta(seconds=self.burst_window_seconds)
+        
+        # Count AI domain accesses in window
+        ai_count = 0
+        for domain in self.ai_domain_access:
+            recent = [
+                ts for ts in self.ai_domain_access[domain]
+                if ts > window_start
+            ]
+            ai_count += len(recent)
+        
+        if ai_count >= self.burst_threshold:
+            return {
+                'event_type': SuspiciousEventType.AI_DOMAIN_BURST.value,
+                'count': ai_count,
+                'severity': 'HIGH',
+                'window_seconds': self.burst_window_seconds,
+                'details': {
+                    'reason': f'{ai_count} AI domain queries in {self.burst_window_seconds}s',
+                    'threshold': self.burst_threshold
+                }
+            }
+        
+        return None
+    
+    def _detect_browsing_burst(self, now: datetime) -> Optional[Dict]:
+        """
+        Detect general browsing burst (many domains in short time).
+        
+        Args:
+            now: Current datetime
+            
+        Returns:
+            Event dict if detected, None otherwise
+        """
+        window_start = now - timedelta(seconds=self.burst_window_seconds)
+        
+        # Count unique domains in window
+        domains_in_window = set()
+        for domain, timestamp in self.recent_queries:
+            if timestamp > window_start:
+                domains_in_window.add(domain)
+        
+        # Burst is many unique domains
+        if len(domains_in_window) >= self.burst_threshold * 2:
+            return {
+                'event_type': SuspiciousEventType.BROWSING_BURST.value,
+                'count': len(domains_in_window),
+                'severity': 'LOW',
+                'window_seconds': self.burst_window_seconds,
+                'details': {
+                    'reason': f'{len(domains_in_window)} unique domains in {self.burst_window_seconds}s',
+                    'domains': list(domains_in_window)[:5]  # First 5
+                }
+            }
+        
+        return None
+    
+    def _detect_rapid_queries(self, now: datetime) -> Optional[Dict]:
+        """
+        Detect rapid query rate (many queries in very short time).
+        
+        Args:
+            now: Current datetime
+            
+        Returns:
+            Event dict if detected, None otherwise
+        """
+        window_start = now - timedelta(seconds=self.rapid_query_window_seconds)
+        
+        # Count queries in rapid window
+        rapid_count = sum(
+            1 for domain, timestamp in self.recent_queries
+            if timestamp > window_start
+        )
+        
+        if rapid_count >= self.rapid_query_threshold:
+            return {
+                'event_type': SuspiciousEventType.RAPID_QUERIES.value,
+                'count': rapid_count,
+                'severity': 'MEDIUM',
+                'window_seconds': self.rapid_query_window_seconds,
+                'details': {
+                    'reason': f'{rapid_count} queries in {self.rapid_query_window_seconds}s',
+                    'rate_per_second': f'{rapid_count / self.rapid_query_window_seconds:.1f}'
+                }
+            }
+        
+        return None
+    
+    def _detect_domain_switching(self, now: datetime) -> Optional[Dict]:
+        """
+        Detect rapid switching between different domains.
+        
+        Args:
+            now: Current datetime
+            
+        Returns:
+            Event dict if detected, None otherwise
+        """
+        window_start = now - timedelta(seconds=self.burst_window_seconds)
+        
+        # Get recent queries in order
+        recent = [
+            domain for domain, timestamp in self.recent_queries
+            if timestamp > window_start
+        ]
+        
+        if len(recent) < 4:
+            return None
+        
+        # Count domain changes (switching between different domains)
+        switches = 0
+        for i in range(1, len(recent)):
+            if recent[i] != recent[i-1]:
+                switches += 1
+        
+        # High switching ratio indicates alternating between domains
+        if len(recent) > 0:
+            switch_ratio = switches / len(recent)
+            if switch_ratio > 0.6 and switches >= 3:  # High switching activity
+                return {
+                    'event_type': SuspiciousEventType.DOMAIN_SWITCHING.value,
+                    'count': switches,
+                    'severity': 'LOW',
+                    'window_seconds': self.burst_window_seconds,
+                    'details': {
+                        'reason': f'Rapid switching between {len(set(recent))} domains',
+                        'switch_count': switches,
+                        'unique_domains': len(set(recent))
+                    }
+                }
+        
+        return None
+    
+    def get_statistics(self) -> Dict:
+        """
+        Get detector statistics.
+        
+        Returns:
+            Statistics dictionary
+        """
+        return {
+            'total_queries_tracked': len(self.recent_queries),
+            'unique_domains_accessed': len(self.domain_access_counts),
+            'ai_domains_accessed': len(self.ai_domain_access),
+            'most_accessed': self._get_most_accessed(5)
+        }
+    
+    def _get_most_accessed(self, limit: int = 5) -> List[Tuple[str, int]]:
+        """
+        Get most accessed domains.
+        
+        Args:
+            limit: Number of top domains
+            
+        Returns:
+            List of (domain, count) tuples
+        """
+        sorted_domains = sorted(
+            self.domain_access_counts.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        return sorted_domains[:limit]
+
+
+if __name__ == "__main__":
+    # Test detector
+    logging.basicConfig(level=logging.INFO)
+    
+    ai_domains = {
+        'chat.openai.com',
+        'openai.com',
+        'claude.ai',
+        'anthropic.com',
+        'gemini.google.com'
+    }
+    
+    detector = SuspiciousEventDetector(
+        ai_domains=ai_domains,
+        burst_threshold=3,
+        burst_window_seconds=10
+    )
+    
+    print("\n" + "="*60)
+    print("SUSPICIOUS EVENT DETECTION TEST")
+    print("="*60)
+    
+    # Simulate rapid AI domain access
+    now = datetime.now()
+    test_queries = [
+        ('google.com', now),
+        ('chat.openai.com', now),
+        ('github.com', now + timedelta(seconds=1)),
+        ('chat.openai.com', now + timedelta(seconds=2)),
+        ('claude.ai', now + timedelta(seconds=3)),
+        ('chat.openai.com', now + timedelta(seconds=4)),
+    ]
+    
+    print("\nSimulating query stream...")
+    for domain, timestamp in test_queries:
+        events = detector.detect_events(domain, timestamp.isoformat())
+        print(f"\n[{timestamp.strftime('%H:%M:%S')}] {domain}")
+        if events:
+            for event in events:
+                print(f"  ⚠️  {event['event_type']} (Severity: {event['severity']})")
+        else:
+            print(f"  ✓ No events")
+    
+    print("\n" + "="*60)
+    print("STATISTICS")
+    print("="*60)
+    stats = detector.get_statistics()
+    for key, value in stats.items():
+        print(f"{key}: {value}")
+
+
+
+
+Dns logger · PY
+
+#!/usr/bin/env python3
+"""
+DNS Logger Module - Chunk 2 Implementation
+Stores captured DNS metadata to JSON and SQLite for persistence and analysis.
+"""
+
+import json
+import sqlite3
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, List, Dict
+import logging
+import threading
+
+logger = logging.getLogger("DNSLogger")
+
+
+class DNSLogger:
+    """
+    Logs DNS metadata to both JSON and SQLite.
+    Provides lightweight storage without machine learning.
+    """
+    
+    def __init__(
+        self,
+        log_dir: str = "./dns_logs",
+        db_name: str = "dns_capture.db",
+        json_name: str = "dns_queries.jsonl"
+    ):
+        """
+        Initialize DNS logger.
+        
+        Args:
+            log_dir: Directory for log files
+            db_name: SQLite database filename
+            json_name: JSONL log filename
+        """
+        self.log_dir = Path(log_dir)
+        self.db_path = self.log_dir / db_name
+        self.json_path = self.log_dir / json_name
+        
+        # Thread safety
+        self.lock = threading.Lock()
+        
+        # Create log directory
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize database
+        self._init_database()
+        
+        logger.info(f"DNSLogger initialized - Log dir: {self.log_dir}")
+    
+    def _init_database(self):
+        """Initialize SQLite database schema."""
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            
+            # Create DNS queries table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS dns_queries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    domain TEXT NOT NULL,
+                    source_ip TEXT,
+                    query_type TEXT DEFAULT 'A',
+                    protocol TEXT DEFAULT 'UDP',
+                    category TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(timestamp, domain)
+                )
+            ''')
+            
+            # Create suspicious events table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS suspicious_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    domain TEXT,
+                    count INTEGER,
+                    first_seen TEXT,
+                    last_seen TEXT,
+                    details TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create statistics table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS capture_statistics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_start TEXT NOT NULL,
+                    session_end TEXT,
+                    total_packets INTEGER,
+                    unique_domains INTEGER,
+                    malformed_packets INTEGER,
+                    errors INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            conn.commit()
+            conn.close()
+            logger.info(f"Database initialized: {self.db_path}")
+        
+        except Exception as e:
+            logger.error(f"Database initialization error: {str(e)}")
+            raise
+    
+    def log_dns_query(
+        self,
+        domain: str,
+        timestamp: str,
+        source_ip: Optional[str] = None,
+        query_type: str = 'A',
+        protocol: str = 'UDP',
+        category: Optional[str] = None
+    ) -> bool:
+        """
+        Log a DNS query to database and JSON.
+        
+        Args:
+            domain: Queried domain
+            timestamp: ISO format timestamp
+            source_ip: Source IP address (if available)
+            query_type: DNS query type (A, AAAA, MX, etc.)
+            protocol: Transport protocol (UDP, TCP)
+            category: Domain category (set by categorizer)
+            
+        Returns:
+            True if logged successfully
+        """
+        try:
+            with self.lock:
+                # Log to SQLite
+                conn = sqlite3.connect(str(self.db_path))
+                cursor = conn.cursor()
+                
+                cursor.execute('''
+                    INSERT OR IGNORE INTO dns_queries
+                    (timestamp, domain, source_ip, query_type, protocol, category)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (timestamp, domain, source_ip, query_type, protocol, category))
+                
+                conn.commit()
+                conn.close()
+                
+                # Log to JSONL
+                record = {
+                    'timestamp': timestamp,
+                    'domain': domain,
+                    'source_ip': source_ip,
+                    'query_type': query_type,
+                    'protocol': protocol,
+                    'category': category
+                }
+                
+                with open(self.json_path, 'a') as f:
+                    f.write(json.dumps(record) + '\n')
+                
+                return True
+        
+        except Exception as e:
+            logger.error(f"Error logging DNS query: {str(e)}")
+            return False
+    
+    def log_suspicious_event(
+        self,
+        event_type: str,
+        domain: Optional[str] = None,
+        count: int = 1,
+        first_seen: Optional[str] = None,
+        last_seen: Optional[str] = None,
+        details: Optional[dict] = None
+    ) -> bool:
+        """
+        Log a suspicious event.
+        
+        Args:
+            event_type: Type of event (e.g., 'AI_DOMAIN_BURST', 'SUSPICIOUS_DOMAIN')
+            domain: Associated domain (if applicable)
+            count: Occurrence count
+            first_seen: First occurrence timestamp
+            last_seen: Last occurrence timestamp
+            details: Additional details as dict
+            
+        Returns:
+            True if logged successfully
+        """
+        try:
+            with self.lock:
+                conn = sqlite3.connect(str(self.db_path))
+                cursor = conn.cursor()
+                
+                details_json = json.dumps(details) if details else None
+                
+                cursor.execute('''
+                    INSERT INTO suspicious_events
+                    (event_type, domain, count, first_seen, last_seen, details)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (event_type, domain, count, first_seen, last_seen, details_json))
+                
+                conn.commit()
+                conn.close()
+                
+                logger.info(f"Suspicious event logged: {event_type} - {domain}")
+                return True
+        
+        except Exception as e:
+            logger.error(f"Error logging suspicious event: {str(e)}")
+            return False
+    
+    def log_session_statistics(
+        self,
+        session_start: str,
+        total_packets: int,
+        unique_domains: int,
+        malformed_packets: int = 0,
+        errors: int = 0,
+        session_end: Optional[str] = None
+    ) -> bool:
+        """
+        Log session statistics.
+        
+        Args:
+            session_start: Session start timestamp
+            total_packets: Total packets processed
+            unique_domains: Unique domains captured
+            malformed_packets: Count of malformed packets
+            errors: Count of errors
+            session_end: Session end timestamp
+            
+        Returns:
+            True if logged successfully
+        """
+        try:
+            with self.lock:
+                conn = sqlite3.connect(str(self.db_path))
+                cursor = conn.cursor()
+                
+                if session_end is None:
+                    session_end = datetime.now().isoformat()
+                
+                cursor.execute('''
+                    INSERT INTO capture_statistics
+                    (session_start, session_end, total_packets, unique_domains,
+                     malformed_packets, errors)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (session_start, session_end, total_packets, unique_domains,
+                      malformed_packets, errors))
+                
+                conn.commit()
+                conn.close()
+                
+                logger.info("Session statistics logged")
+                return True
+        
+        except Exception as e:
+            logger.error(f"Error logging session statistics: {str(e)}")
+            return False
+    
+    def get_recent_domains(self, limit: int = 100) -> List[Dict]:
+        """
+        Get recently captured domains.
+        
+        Args:
+            limit: Maximum number of records to return
+            
+        Returns:
+            List of domain query dicts
+        """
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT timestamp, domain, source_ip, query_type, protocol, category
+                FROM dns_queries
+                ORDER BY timestamp DESC
+                LIMIT ?
+            ''', (limit,))
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            return [
+                {
+                    'timestamp': row[0],
+                    'domain': row[1],
+                    'source_ip': row[2],
+                    'query_type': row[3],
+                    'protocol': row[4],
+                    'category': row[5]
+                }
+                for row in rows
+            ]
+        
+        except Exception as e:
+            logger.error(f"Error retrieving recent domains: {str(e)}")
+            return []
+    
+    def get_domain_stats(self) -> Dict:
+        """
+        Get database statistics.
+        
+        Returns:
+            Dictionary with query and event counts
+        """
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            
+            # Get counts
+            cursor.execute('SELECT COUNT(DISTINCT domain) FROM dns_queries')
+            unique_domains = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM dns_queries')
+            total_queries = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM suspicious_events')
+            suspicious_events = cursor.fetchone()[0]
+            
+            conn.close()
+            
+            return {
+                'unique_domains': unique_domains,
+                'total_queries': total_queries,
+                'suspicious_events': suspicious_events
+            }
+        
+        except Exception as e:
+            logger.error(f"Error retrieving statistics: {str(e)}")
+            return {}
+    
+    def get_suspicious_events(self, limit: int = 50) -> List[Dict]:
+        """
+        Get recent suspicious events.
+        
+        Args:
+            limit: Maximum number of events to return
+            
+        Returns:
+            List of event dicts
+        """
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT event_type, domain, count, first_seen, last_seen, details
+                FROM suspicious_events
+                ORDER BY created_at DESC
+                LIMIT ?
+            ''', (limit,))
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            return [
+                {
+                    'event_type': row[0],
+                    'domain': row[1],
+                    'count': row[2],
+                    'first_seen': row[3],
+                    'last_seen': row[4],
+                    'details': json.loads(row[5]) if row[5] else None
+                }
+                for row in rows
+            ]
+        
+        except Exception as e:
+            logger.error(f"Error retrieving suspicious events: {str(e)}")
+            return []
+    
+    def export_session_report(self, output_path: Optional[str] = None) -> str:
+        """
+        Export complete session report as JSON.
+        
+        Args:
+            output_path: Custom output path (optional)
+            
+        Returns:
+            Path to exported report
+        """
+        try:
+            if output_path is None:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                output_path = str(self.log_dir / f"report_{timestamp}.json")
+            
+            report = {
+                'generated_at': datetime.now().isoformat(),
+                'statistics': self.get_domain_stats(),
+                'recent_domains': self.get_recent_domains(limit=500),
+                'suspicious_events': self.get_suspicious_events(limit=100)
+            }
+            
+            with open(output_path, 'w') as f:
+                json.dump(report, f, indent=2)
+            
+            logger.info(f"Session report exported: {output_path}")
+            return output_path
+        
+        except Exception as e:
+            logger.error(f"Error exporting session report: {str(e)}")
+            return ""
+
+
+if __name__ == "__main__":
+    # Test logger
+    logger_instance = DNSLogger()
+    
+    # Test logging
+    logger_instance.log_dns_query(
+        domain="google.com",
+        timestamp=datetime.now().isoformat(),
+        category="Search Engine"
+    )
+    
+    logger_instance.log_suspicious_event(
+        event_type="TEST_EVENT",
+        domain="test.com",
+        details={'reason': 'Test'}
+    )
+    
+    # Print stats
+    print(logger_instance.get_domain_stats())
+
+
+
+
+Monitor · PY
+
+
+
+#!/usr/bin/env python3
+"""
+Main Monitoring Orchestrator - Chunk 2 Integration
+Coordinates DNS capture, categorization, event detection, and logging.
+Runs as standalone module before FastAPI integration.
+"""
+
+import logging
+import sys
+from datetime import datetime
+import threading
+from typing import Optional
+
+from dns_capture import DNSPacketCapture
+from dns_logger import DNSLogger
+from dns_categorizer import DomainCategorizer
+from dns_event_detector import SuspiciousEventDetector
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('./dns_logs/monitor.log')
+    ]
+)
+logger = logging.getLogger("MonitorOrchestrator")
+
+
+class MonitoringOrchestrator:
+    """
+    Main orchestrator for DNS monitoring pipeline.
+    Coordinates:
+    - Packet capture (tshark)
+    - Domain categorization (rule-based)
+    - Event detection (suspicious patterns)
+    - Logging (SQLite + JSON)
+    """
+    
+    def __init__(self, interface: str = 'any'):
+        """
+        Initialize monitoring orchestrator.
+        
+        Args:
+            interface: Network interface to monitor
+        """
+        self.interface = interface
+        self.running = True
+        
+        # Initialize components
+        logger.info("Initializing monitoring components...")
+        
+        self.capture = DNSPacketCapture(interface=interface)
+        self.logger = DNSLogger()
+        self.categorizer = DomainCategorizer()
+        self.event_detector = SuspiciousEventDetector(
+            ai_domains=self.categorizer.get_suspicious_domains(),
+            burst_threshold=3,
+            burst_window_seconds=10
+        )
+        
+        # Statistics
+        self.stats = {
+            'total_domains': 0,
+            'events_generated': 0,
+            'ai_domains': 0
+        }
+        
+        logger.info("MonitoringOrchestrator initialized successfully")
+    
+    def _process_domain(self, domain: str, timestamp: str):
+        """
+        Process a captured domain through the pipeline.
+        
+        Args:
+            domain: Domain name
+            timestamp: ISO format timestamp
+        """
+        # Categorize
+        category = self.categorizer.categorize(domain)
+        category_str = category.value
+        
+        # Update AI domain count
+        if category_str == "AI Assistant":
+            self.stats['ai_domains'] += 1
+        
+        # Log to database
+        self.logger.log_dns_query(
+            domain=domain,
+            timestamp=timestamp,
+            category=category_str
+        )
+        
+        # Detect suspicious events
+        events = self.event_detector.detect_events(domain, timestamp)
+        
+        # Log events
+        for event in events:
+            self.logger.log_suspicious_event(
+                event_type=event['event_type'],
+                domain=event.get('domain'),
+                count=event.get('count', 1),
+                first_seen=timestamp,
+                last_seen=timestamp,
+                details=event.get('details')
+            )
+            
+            self.stats['events_generated'] += 1
+            
+            # Print event alert
+            severity = event.get('severity', 'INFO')
+            print(f"\n⚠️  EVENT: {event['event_type']} ({severity})")
+            if event.get('domain'):
+                print(f"   Domain: {event['domain']}")
+            if event.get('details'):
+                print(f"   Details: {event['details'].get('reason', '')}")
+            print()
+    
+    def _run_capture_thread(self):
+        """Run packet capture in separate thread."""
+        try:
+            capture = DNSPacketCapture(interface=self.interface)
+            
+            # Override capture's internal running flag
+            original_handler = capture._handle_shutdown
+            
+            def patched_handler(signum, frame):
+                self.running = False
+                original_handler(signum, frame)
+            
+            capture._handle_shutdown = patched_handler
+            
+            # Start capture
+            import pyshark
+            import signal
+            
+            print("\n" + "="*60)
+            print("DNS MONITORING ORCHESTRATOR - CHUNK 2")
+            print("="*60)
+            print(f"Interface: {self.interface}")
+            print(f"Components: Capture, Categorizer, EventDetector, Logger")
+            print("Listening for DNS traffic (Ctrl+C to stop)...\n")
+            
+            capture_obj = pyshark.LiveCapture(
+                interface=self.interface,
+                display_filter='dns'
+            )
+            
+            for packet in capture_obj.sniff_continuously():
+                if not self.running:
+                    break
+                
+                capture.packet_count += 1
+                
+                # Extract domains
+                domains = capture._extract_dns_domains(packet)
+                
+                for domain in domains:
+                    # Skip duplicates
+                    if capture._is_duplicate(domain):
+                        continue
+                    
+                    capture.domain_count += 1
+                    self.stats['total_domains'] += 1
+                    timestamp = datetime.now().isoformat()
+                    
+                    # Print to console
+                    time_str = datetime.fromisoformat(timestamp).strftime('%H:%M:%S')
+                    print(f"[{time_str}] {domain:40} ({self.categorizer.categorize(domain).value})")
+                    
+                    # Process through pipeline
+                    self._process_domain(domain, timestamp)
+        
+        except PermissionError:
+            logger.error("ERROR: Requires root/sudo privileges")
+            logger.error("Run with: sudo python3 monitor.py")
+            sys.exit(1)
+        except Exception as e:
+            logger.error(f"Capture thread error: {str(e)}")
+    
+    def start(self):
+        """
+        Start monitoring orchestrator.
+        Runs packet capture and processes domains.
+        """
+        try:
+            # Start capture in main thread
+            self._run_capture_thread()
+        
+        except KeyboardInterrupt:
+            self._shutdown()
+        except Exception as e:
+            logger.error(f"Fatal error: {str(e)}")
+            self._shutdown()
+    
+    def _shutdown(self):
+        """Graceful shutdown and reporting."""
+        logger.info("Shutting down orchestrator...")
+        self.running = False
+        
+        # Save session statistics
+        session_stats = self.event_detector.get_statistics()
+        
+        self.logger.log_session_statistics(
+            session_start=self.capture.start_time.isoformat(),
+            session_end=datetime.now().isoformat(),
+            total_packets=self.capture.packet_count,
+            unique_domains=self.stats['total_domains'],
+            malformed_packets=self.capture.malformed_count,
+            errors=self.capture.error_count
+        )
+        
+        # Export report
+        report_path = self.logger.export_session_report()
+        
+        # Print final statistics
+        print("\n" + "="*60)
+        print("MONITORING SESSION COMPLETE")
+        print("="*60)
+        print(f"\nCapture Statistics:")
+        print(f"  Total Packets: {self.capture.packet_count}")
+        print(f"  Unique Domains: {self.stats['total_domains']}")
+        print(f"  AI Assistant Domains: {self.stats['ai_domains']}")
+        print(f"  Events Generated: {self.stats['events_generated']}")
+        print(f"  Malformed Packets: {self.capture.malformed_count}")
+        print(f"  Errors: {self.capture.error_count}")
+        
+        print(f"\nEvent Detector Statistics:")
+        for key, value in session_stats.items():
+            if isinstance(value, list):
+                print(f"  {key}: {value[:3]}")  # Show first 3
+            else:
+                print(f"  {key}: {value}")
+        
+        print(f"\nCategory Distribution:")
+        categories = self.categorizer.get_category_stats(
+            [d['domain'] for d in self.logger.get_recent_domains(limit=1000)]
+        )
+        for category, count in sorted(categories.items(), key=lambda x: x[1], reverse=True):
+            percentage = (count / self.stats['total_domains'] * 100) if self.stats['total_domains'] > 0 else 0
+            print(f"  {category:20} {count:4d} ({percentage:5.1f}%)")
+        
+        print(f"\nData Storage:")
+        print(f"  Database: {self.logger.db_path}")
+        print(f"  JSON Log: {self.logger.json_path}")
+        print(f"  Report: {report_path}")
+        
+        logger.info("Monitoring session ended successfully")
+        print("="*60 + "\n")
+
+
+def main():
+    """Main entry point."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description='DNS Monitoring Orchestrator - Chunk 2'
+    )
+    parser.add_argument(
+        '--interface',
+        default='any',
+        help='Network interface to monitor (default: any)'
+    )
+    
+    args = parser.parse_args()
+    
+    orchestrator = MonitoringOrchestrator(interface=args.interface)
+    orchestrator.start()
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+Test scenarios
+
+
+# Chunk 2 Test Scenarios
+
+## Overview
+
+This document provides step-by-step test scenarios to verify all Chunk 2 functionality:
+1. Basic packet capture
+2. Domain categorization
+3. Event detection
+4. Database logging
+5. Real-time monitoring
+
+## Setup Before Testing
+
+```bash
+# Terminal 1: Start monitoring
+cd ~/packet_test
+source venv/bin/activate
+sudo python3 monitor.py
+
+# Note the output directory for logs
+# dns_logs/dns_capture.db
+# dns_logs/dns_queries.jsonl
+```
+
+---
+
+## Test 1: Basic DNS Packet Capture
+
+**Objective**: Verify dns_capture.py captures DNS packets
+
+**Steps**:
+```bash
+# Terminal 2: Generate test traffic
+curl -s https://google.com > /dev/null
+curl -s https://github.com > /dev/null
+curl -s https://youtube.com > /dev/null
+```
+
+**Expected Output (Terminal 1)**:
+```
+[HH:MM:SS] google.com                    (Search Engine)
+[HH:MM:SS] github.com                    (Development)
+[HH:MM:SS] youtube.com                   (Video Streaming)
+```
+
+**Verification**:
+- ✓ Timestamps appear
+- ✓ Domain names print
+- ✓ No errors in capture
+- ✓ Domains appear within 2 seconds of curl
+
+---
+
+## Test 2: Domain Categorization
+
+**Objective**: Verify dns_categorizer.py correctly classifies domains
+
+**Steps**:
+```bash
+# Generate traffic across all categories
+curl -s https://google.com > /dev/null      # Search Engine
+curl -s https://facebook.com > /dev/null    # Social Media
+curl -s https://github.com > /dev/null      # Development
+curl -s https://youtube.com > /dev/null     # Video Streaming
+curl -s https://amazon.com > /dev/null      # Shopping
+curl -s https://gmail.com > /dev/null       # Communication
+curl -s https://paypal.com > /dev/null      # Banking
+```
+
+**Expected Output**:
+```
+[HH:MM:SS] google.com                    (Search Engine)
+[HH:MM:SS] facebook.com                  (Social Media)
+[HH:MM:SS] github.com                    (Development)
+[HH:MM:SS] youtube.com                   (Video Streaming)
+[HH:MM:SS] amazon.com                    (Shopping)
+[HH:MM:SS] gmail.com                     (Communication)
+[HH:MM:SS] paypal.com                    (Banking)
+```
+
+**Verification**:
+```bash
+# Query database
+sqlite3 dns_logs/dns_capture.db \
+    "SELECT domain, category FROM dns_queries ORDER BY domain;"
+
+# Expected:
+# amazon.com|Shopping
+# facebook.com|Social Media
+# github.com|Development
+# gmail.com|Communication
+# google.com|Search Engine
+# paypal.com|Banking
+# youtube.com|Video Streaming
+```
+
+---
+
+## Test 3: AI Assistant Domain Detection
+
+**Objective**: Verify AI domains are correctly identified and events generated
+
+**Steps**:
+```bash
+# Access AI assistant domains multiple times
+for i in {1..3}; do
+    curl -s https://chat.openai.com > /dev/null
+    sleep 1
+done
+
+for i in {1..2}; do
+    curl -s https://claude.ai > /dev/null
+    sleep 1
+done
+
+curl -s https://gemini.google.com > /dev/null
+```
+
+**Expected Output**:
+```
+[HH:MM:SS] chat.openai.com               (AI Assistant)
+[HH:MM:SS] chat.openai.com               (AI Assistant)
+[HH:MM:SS] chat.openai.com               (AI Assistant)
+
+⚠️  EVENT: REPEATED_AI_DOMAIN (MEDIUM)
+   Domain: chat.openai.com
+   Details: chat.openai.com accessed 3 times
+
+[HH:MM:SS] claude.ai                     (AI Assistant)
+[HH:MM:SS] claude.ai                     (AI Assistant)
+
+⚠️  EVENT: REPEATED_AI_DOMAIN (MEDIUM)
+   Domain: claude.ai
+   Details: claude.ai accessed 2 times
+
+[HH:MM:SS] gemini.google.com             (AI Assistant)
+```
+
+**Verification**:
+```bash
+# Check AI domains logged correctly
+sqlite3 dns_logs/dns_capture.db \
+    "SELECT domain FROM dns_queries WHERE category='AI Assistant';"
+
+# Check events generated
+sqlite3 dns_logs/dns_capture.db \
+    "SELECT event_type, domain, count FROM suspicious_events \
+     WHERE event_type='REPEATED_AI_DOMAIN';"
+```
+
+---
+
+## Test 4: Rapid Query Burst Detection
+
+**Objective**: Verify event detector catches rapid query bursts
+
+**Steps**:
+```bash
+# Generate rapid burst of queries
+for domain in google.com github.com facebook.com twitter.com linkedin.com youtube.com; do
+    curl -s https://$domain > /dev/null &
+done
+wait
+sleep 2
+
+# More rapid traffic
+for i in {1..15}; do
+    curl -s https://amazon.com > /dev/null &
+done
+wait
+```
+
+**Expected Output**:
+```
+[HH:MM:SS] google.com                    (Search Engine)
+[HH:MM:SS] github.com                    (Development)
+[HH:MM:SS] facebook.com                  (Social Media)
+[HH:MM:SS] twitter.com                   (Social Media)
+
+⚠️  EVENT: RAPID_QUERIES (MEDIUM)
+   Details: 10+ queries in 5s, rate: 2.0/sec
+
+⚠️  EVENT: BROWSING_BURST (LOW)
+   Details: 6 unique domains in 10s
+```
+
+**Verification**:
+```bash
+# Check rapid query events
+sqlite3 dns_logs/dns_capture.db \
+    "SELECT event_type, count FROM suspicious_events \
+     WHERE event_type IN ('RAPID_QUERIES', 'BROWSING_BURST');"
+```
+
+---
+
+## Test 5: AI Domain Burst Detection
+
+**Objective**: Verify AI burst event when multiple AI domains accessed rapidly
+
+**Steps**:
+```bash
+# Rapid access to multiple AI domains
+curl -s https://chat.openai.com > /dev/null &
+curl -s https://claude.ai > /dev/null &
+curl -s https://gemini.google.com > /dev/null &
+curl -s https://chat.openai.com > /dev/null &
+wait
+```
+
+**Expected Output**:
+```
+[HH:MM:SS] chat.openai.com               (AI Assistant)
+[HH:MM:SS] claude.ai                     (AI Assistant)
+[HH:MM:SS] gemini.google.com             (AI Assistant)
+[HH:MM:SS] chat.openai.com               (AI Assistant)
+
+⚠️  EVENT: AI_DOMAIN_BURST (HIGH)
+   Count: 4, window_seconds: 10
+   Details: 4 AI domain queries in 10s
+```
+
+**Verification**:
+```bash
+# Check AI burst events
+sqlite3 dns_logs/dns_capture.db \
+    "SELECT * FROM suspicious_events \
+     WHERE event_type='AI_DOMAIN_BURST';"
+```
+
+---
+
+## Test 6: Domain Switching Detection
+
+**Objective**: Verify detection of rapid domain switching
+
+**Steps**:
+```bash
+# Alternate between different domains
+curl -s https://google.com > /dev/null
+curl -s https://facebook.com > /dev/null
+curl -s https://google.com > /dev/null
+curl -s https://facebook.com > /dev/null
+curl -s https://google.com > /dev/null
+curl -s https://facebook.com > /dev/null
+```
+
+**Expected Output**:
+```
+[HH:MM:SS] google.com                    (Search Engine)
+[HH:MM:SS] facebook.com                  (Social Media)
+[HH:MM:SS] google.com                    (Search Engine)
+[HH:MM:SS] facebook.com                  (Social Media)
+[HH:MM:SS] google.com                    (Search Engine)
+[HH:MM:SS] facebook.com                  (Social Media)
+
+⚠️  EVENT: DOMAIN_SWITCHING (LOW)
+   Details: Rapid switching between 2 domains, 5 switches
+```
+
+**Verification**:
+```bash
+# Check domain switching events
+sqlite3 dns_logs/dns_capture.db \
+    "SELECT event_type, details FROM suspicious_events \
+     WHERE event_type='DOMAIN_SWITCHING';"
+```
+
+---
+
+## Test 7: Database Logging
+
+**Objective**: Verify all data stored correctly in SQLite
+
+**Steps**:
+```bash
+# Generate diverse traffic
+curl -s https://google.com > /dev/null
+curl -s https://github.com > /dev/null
+curl -s https://chat.openai.com > /dev/null
+curl -s https://youtube.com > /dev/null
+
+# Wait for logging to complete
+sleep 5
+```
+
+**Verification**:
+```bash
+# Check dns_queries table
+sqlite3 dns_logs/dns_capture.db << 'EOF'
+SELECT COUNT(*) as total_queries FROM dns_queries;
+SELECT COUNT(DISTINCT domain) as unique_domains FROM dns_queries;
+SELECT category, COUNT(*) as count FROM dns_queries GROUP BY category ORDER BY count DESC;
+EOF
+
+# Expected output:
+# total_queries: 4
+# unique_domains: 4
+# category distribution: 1 AI Assistant, 1 Development, 1 Search Engine, 1 Video Streaming
+```
+
+---
+
+## Test 8: JSONL Log File
+
+**Objective**: Verify streaming JSONL format logging
+
+**Steps**:
+```bash
+# Trigger some queries
+curl -s https://google.com > /dev/null
+curl -s https://github.com > /dev/null
+
+# Check JSONL file
+tail -5 dns_logs/dns_queries.jsonl | python3 -m json.tool
+```
+
+**Expected Output**:
+```json
+{
+  "timestamp": "2024-05-27T12:44:10.123456",
+  "domain": "google.com",
+  "source_ip": null,
+  "query_type": "A",
+  "protocol": "UDP",
+  "category": "Search Engine"
+}
+{
+  "timestamp": "2024-05-27T12:44:11.234567",
+  "domain": "github.com",
+  "source_ip": null,
+  "query_type": "A",
+  "protocol": "UDP",
+  "category": "Development"
+}
+```
+
+---
+
+## Test 9: Session Statistics Export
+
+**Objective**: Verify report generation and statistics
+
+**Steps**:
+```bash
+# Stop monitoring gracefully
+# Press Ctrl+C in Terminal 1
+
+# Expected output before exit:
+# ============================================================
+# MONITORING SESSION COMPLETE
+# ============================================================
+# Capture Statistics:
+#   Total Packets: 47
+#   Unique Domains: 12
+#   AI Assistant Domains: 3
+#   Events Generated: 8
+#   ...
+```
+
+**Verification**:
+```bash
+# Check generated report
+ls -lah dns_logs/report_*.json
+
+# Read report
+cat dns_logs/report_*.json | python3 -m json.tool | head -50
+```
+
+---
+
+## Test 10: Multiple Modules Integration
+
+**Objective**: Verify all modules work together in pipeline
+
+**Steps**:
+
+### Test capture + categorizer
+```bash
+cd ~/packet_test
+source venv/bin/activate
+python3 << 'EOF'
+from dns_capture import DNSPacketCapture
+from dns_categorizer import DomainCategorizer
+
+categorizer = DomainCategorizer()
+
+# Test domains
+domains = [
+    'chat.openai.com',
+    'github.com',
+    'youtube.com',
+    'unknown-domain.xyz'
+]
+
+for domain in domains:
+    category = categorizer.categorize(domain)
+    is_ai = categorizer.is_ai_assistant(domain)
+    print(f"{domain:30} → {category.value:20} (AI: {is_ai})")
+EOF
+```
+
+**Expected Output**:
+```
+chat.openai.com                → AI Assistant           (AI: True)
+github.com                     → Development            (AI: False)
+youtube.com                    → Video Streaming        (AI: False)
+unknown-domain.xyz            → Unknown                (AI: False)
+```
+
+### Test logger
+```bash
+python3 << 'EOF'
+from dns_logger import DNSLogger
+from datetime import datetime
+
+logger = DNSLogger()
+
+# Log test queries
+logger.log_dns_query("google.com", datetime.now().isoformat(), category="Search Engine")
+logger.log_dns_query("chat.openai.com", datetime.now().isoformat(), category="AI Assistant")
+
+# Log test event
+logger.log_suspicious_event("TEST_EVENT", "test.com", details={"reason": "test"})
+
+# Export stats
+stats = logger.get_domain_stats()
+print("Statistics:", stats)
+EOF
+```
+
+**Expected Output**:
+```
+Statistics: {'unique_domains': 2, 'total_queries': 2, 'suspicious_events': 1}
+```
+
+### Test event detector
+```bash
+python3 << 'EOF'
+from dns_event_detector import SuspiciousEventDetector
+from datetime import datetime, timedelta
+
+ai_domains = {'chat.openai.com', 'claude.ai'}
+detector = SuspiciousEventDetector(ai_domains, burst_threshold=3)
+
+now = datetime.now()
+domains = [
+    ('chat.openai.com', now),
+    ('chat.openai.com', now + timedelta(seconds=1)),
+    ('claude.ai', now + timedelta(seconds=2)),
+    ('chat.openai.com', now + timedelta(seconds=3)),
+]
+
+print("Detecting events in burst...")
+for domain, timestamp in domains:
+    events = detector.detect_events(domain, timestamp.isoformat())
+    if events:
+        for event in events:
+            print(f"  Event: {event['event_type']}")
+
+stats = detector.get_statistics()
+print("\nDetector Stats:", stats)
+EOF
+```
+
+**Expected Output**:
+```
+Detecting events in burst...
+  Event: AI_DOMAIN_BURST
+
+Detector Stats: {'total_queries_tracked': 4, 'unique_domains_accessed': 2, 'ai_domains_accessed': 2, ...}
+```
+
+---
+
+## Test 11: Performance & Stress Testing
+
+**Objective**: Verify system handles high volume
+
+**Steps**:
+```bash
+# Generate 100 rapid queries
+echo "Generating stress test traffic..."
+for i in {1..100}; do
+    curl -s https://google.com > /dev/null &
+    if [ $((i % 10)) -eq 0 ]; then
+        wait
+    fi
+done
+wait
+
+echo "Stress test complete"
+```
+
+**Monitor Output**:
+- Should see continuous domain names
+- Multiple events generated
+- No crashes or hangs
+
+**Verification**:
+```bash
+# Check packet count
+sqlite3 dns_logs/dns_capture.db "SELECT COUNT(*) FROM dns_queries;"
+
+# Should show ~100 queries captured
+```
+
+---
+
+## Test 12: Graceful Shutdown
+
+**Objective**: Verify clean shutdown and data persistence
+
+**Steps**:
+```bash
+# While monitoring is running
+# Press Ctrl+C in monitoring terminal
+```
+
+**Expected Output**:
+```
+Shutdown signal received. Cleaning up...
+
+============================================================
+MONITORING SESSION COMPLETE
+============================================================
+
+Capture Statistics:
+  Total Packets: XX
+  Unique Domains: YY
+  AI Assistant Domains: Z
+  ...
+
+Data Storage:
+  Database: ./dns_logs/dns_capture.db
+  JSON Log: ./dns_logs/dns_queries.jsonl
+  Report: ./dns_logs/report_*.json
+
+============================================================
+```
+
+**Verification**:
+```bash
+# Check all data persisted
+ls -lah dns_logs/
+sqlite3 dns_logs/dns_capture.db "SELECT COUNT(*) FROM dns_queries;"
+tail -5 dns_logs/dns_queries.jsonl
+```
+
+---
+
+## Test 13: Interface Switching
+
+**Objective**: Verify capturing on specific interfaces
+
+**Steps**:
+```bash
+# Test with specific interface
+sudo python3 monitor.py --interface eth0
+
+# In another terminal, generate traffic
+curl -s https://google.com > /dev/null
+
+# Should still capture
+```
+
+---
+
+## Test 14: Duplicate Filtering
+
+**Objective**: Verify duplicates within time window are filtered
+
+**Steps**:
+```bash
+# Query same domain multiple times quickly
+curl -s https://google.com > /dev/null
+curl -s https://google.com > /dev/null
+curl -s https://google.com > /dev/null
+
+sleep 6  # Wait past duplicate window (5 seconds)
+
+# Query again
+curl -s https://google.com > /dev/null
+```
+
+**Expected Output**:
+```
+[HH:MM:SS] google.com                    (Search Engine)
+# (no duplicate lines within 5 seconds)
+[HH:MM:SS] google.com                    (Search Engine)  # After 5+ seconds
+```
+
+**Verification**:
+```bash
+# Check database - should have 2 entries
+sqlite3 dns_logs/dns_capture.db \
+    "SELECT timestamp, domain FROM dns_queries WHERE domain='google.com';"
+```
+
+---
+
+## Troubleshooting Test Failures
+
+### No domains captured
+```bash
+# Check tshark works
+sudo tshark -i any -f "dns" -c 5
+
+# Check pyshark works
+python3 -c "import pyshark; print('OK')"
+
+# Run capture module directly
+sudo python3 dns_capture.py
+```
+
+### Events not generated
+```bash
+# Check event detector works independently
+python3 dns_event_detector.py
+
+# Verify thresholds are reasonable
+# Edit monitor.py and reduce burst_threshold for easier triggering
+```
+
+### Database errors
+```bash
+# Check db integrity
+sqlite3 dns_logs/dns_capture.db "PRAGMA integrity_check;"
+
+# Delete and recreate if needed
+rm dns_logs/dns_capture.db
+python3 dns_logger.py
+```
+
+### Permission denied
+```bash
+# Always use sudo
+sudo python3 monitor.py
+
+# Or configure wireshark group
+sudo usermod -a -G wireshark $USER
+```
+
+---
+
+## Test Checklist
+
+Use this checklist to verify all functionality:
+
+```
+✓ Test 1: Basic DNS capture works
+✓ Test 2: Domain categorization accurate
+✓ Test 3: AI domain detection working
+✓ Test 4: Rapid query burst detected
+✓ Test 5: AI burst event generated
+✓ Test 6: Domain switching detected
+✓ Test 7: SQLite database populated
+✓ Test 8: JSONL log file correct format
+✓ Test 9: Session report generated
+✓ Test 10: All modules integrate
+✓ Test 11: High volume handled
+✓ Test 12: Graceful shutdown works
+✓ Test 13: Interface switching works
+✓ Test 14: Duplicate filtering works
+```
+
+Once all tests pass, Chunk 2 is ready for:
+- Production deployment on EC2
+- FastAPI integration (Chunk 3)
+- Dashboard development (Chunk 4)
+
+---
+
+## Advanced Testing
+
+### Test with WireGuard traffic
+```bash
+# If you have a WireGuard client, monitor wg0
+sudo python3 monitor.py --interface wg0
+
+# From client, access websites
+# Should see traffic through tunnel
+```
+
+### Test with real candidate interview
+```bash
+# Run monitoring during actual interview
+sudo python3 monitor.py
+
+# Capture all candidate browsing
+# Verify AI assistant access detected
+# Check event generation during session
+```
+
+### Load test
+```bash
+# Simulate heavy browsing
+for i in {1..1000}; do
+    curl -s https://google.com > /dev/null &
+    if [ $((i % 100)) -eq 0 ]; then
+        wait
+    fi
+done
+wait
+
+# Check performance
+ps aux | grep monitor.py
+# Verify CPU/Memory reasonable
+```
+
+---
+
+This completes the Chunk 2 test scenarios. All tests should pass before moving to Chunk 3 (FastAPI integration).

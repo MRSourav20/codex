@@ -1,0 +1,159 @@
+# Coadex 2.0 — Updated Implementation Plan
+
+## Current Status (Already Done — DO NOT Rewrite)
+
+### ✅ EC2 Backend (Working on 3.235.42.166)
+| Component | File | Status |
+|---|---|---|
+| FastAPI Gateway | [backend/api/main.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/backend/api/main.py) | ✅ Running |
+| Session Management | [backend/session_manager.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/backend/session_manager.py) | ✅ Done |
+| WireGuard Tunnel Server | [backend/session_tunnel.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/backend/session_tunnel.py) | ✅ Done |
+| DNS Packet Capture | [backend/dns_monitor/dns_capture.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/backend/dns_monitor/dns_capture.py) | ✅ Fixed & Stable |
+| DNS Monitor Orchestrator | [backend/monitor_v3.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/backend/monitor_v3.py) | ✅ Running |
+| Domain Categorization | [backend/enrichment/dns_categorizer_v2.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/backend/enrichment/dns_categorizer_v2.py) | ✅ Done |
+| Sarvam AI Enrichment | [backend/enrichment/Sarvam_enrichment.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/backend/enrichment/Sarvam_enrichment.py) | ✅ Done |
+| Intelligence DB | [backend/intelligence/domain_intelligence_db.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/backend/intelligence/domain_intelligence_db.py) | ✅ Done |
+| Anomaly Engine | [backend/anomaly_engine/dns_event_detector.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/backend/anomaly_engine/dns_event_detector.py) | ✅ Done |
+
+### ✅ Existing API Endpoints (EC2 Port 8000)
+```
+POST /session/start     → returns { session_id, wg_config, status }
+POST /session/end/{id}  → tears down session
+POST /events/{id}       → receives client telemetry events
+GET  /report/{id}       → returns session report
+```
+
+> [!IMPORTANT]
+> Do NOT modify the backend unless something is clearly broken. The entire intelligence pipeline is stable. Focus is 100% on the Desktop Client.
+
+---
+
+## What Needs To Be Built: Desktop Client MVP
+
+### Goal
+A minimal Electron desktop app that:
+1. Shows a **Session Login Screen** (candidate enters session code)
+2. **Calls** `POST /session/start` on the EC2 backend
+3. **Writes** the returned `wg_config` to a temp file
+4. **Activates** WireGuard via the OS (`wg-quick up`)
+5. Shows **Connection Status** (tunnel up / backend reachable / monitoring active)
+6. On exit → calls `POST /session/end/{id}` and tears down the tunnel
+
+---
+
+## Desktop Client File Structure
+
+```
+desktop_client/
+├── electron_app/
+│   ├── main.js           ← Electron main process (window, IPC, wg-quick calls)
+│   ├── preload.js        ← Secure IPC bridge to renderer
+│   ├── package.json
+│   ├── renderer/
+│   │   ├── index.html    ← Login screen UI
+│   │   ├── status.html   ← Connection status UI
+│   │   └── app.js        ← Renderer logic (calls preload IPC)
+│   └── assets/
+│       └── logo.png
+└── python_bridge/
+    ├── session_client.py     ← Calls EC2 FastAPI (start/end session)
+    └── tunnel_manager.py     ← Writes wg config, runs wg-quick
+```
+
+> [!NOTE]
+> `python_bridge/` is called by Electron via `child_process.spawn()`. This keeps Node.js and Python cleanly separated. No npm packages needed for tunnel logic.
+
+---
+
+## Task Checklist — TODAY
+
+### Phase 1 — Electron App Shell
+- [ ] Create `desktop_client/electron_app/package.json` with Electron as dependency
+- [ ] Create `main.js` — opens window, handles IPC for `start-session` and `end-session`
+- [ ] Create `preload.js` — exposes `window.coadex.startSession(code)` to renderer
+- [ ] Create `renderer/index.html` — Session code input form + "Connect" button
+
+### Phase 2 — Python Bridge
+- [ ] Create `python_bridge/session_client.py`:
+  - [start_session(candidate_id)](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/backend/api/main.py#28-53) → POST to EC2, returns `{session_id, wg_config}`
+  - [end_session(session_id)](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/backend/session_manager.py#58-76) → POST to EC2
+- [ ] Create `python_bridge/tunnel_manager.py`:
+  - `activate_tunnel(wg_config_str)` → write temp `.conf` file, run `wg-quick up`
+  - `deactivate_tunnel(conf_path)` → run `wg-quick down`
+
+### Phase 3 — Status Screen
+- [ ] Create `renderer/status.html` — shows:
+  - Tunnel Status: `🟢 Connected` / `🔴 Disconnected`
+  - Backend Reachable: `✅ Yes / ❌ No`
+  - Session ID
+  - "End Session" button
+
+### Phase 4 — End-to-End Test
+- [ ] Start FastAPI on EC2: `uvicorn backend.api.main:app --host 0.0.0.0 --port 8000`
+- [ ] Run Electron app locally
+- [ ] Enter any candidate code → hit Connect
+- [ ] Verify WireGuard tunnel activates (check `ifconfig` or `ipconfig`)
+- [ ] Verify DNS queries appear in EC2 monitor logs
+- [ ] Click "End Session" → tunnel tears down
+
+---
+
+## Data Flow — Desktop Client ↔ EC2
+
+```
+[User enters session code]
+         ↓
+[Renderer] → IPC "start-session" → [main.js]
+         ↓
+[main.js] spawns → [session_client.py]
+         ↓
+POST http://3.235.42.166:8000/session/start
+         ↓
+EC2 returns: { session_id, wg_config }
+         ↓
+[tunnel_manager.py] writes /tmp/coadex-<id>.conf
+         ↓
+`wg-quick up /tmp/coadex-<id>.conf` (requires sudo/admin)
+         ↓
+ALL system traffic now routes through EC2
+         ↓
+EC2 monitor_v3.py captures DNS queries from candidate IP
+```
+
+---
+
+## Critical Implementation Notes
+
+### WireGuard Activation
+- **Windows**: Use `wireguard.exe /installtunnelservice <config_path>` (needs admin)
+- **Linux/Mac**: `wg-quick up <config_path>` (needs sudo)
+- The Electron app must request elevated privileges on launch.
+
+### Security
+- Never store `client_privkey` to disk after tunnel is active — keep in memory only.
+- Write WireGuard config to `/tmp/` (Linux) or `%TEMP%` (Windows) and delete after `wg-quick up`.
+
+### What the EC2 Backend Needs (Already Done)
+The `/session/start` endpoint already:
+- Generates a WireGuard key pair.
+- Returns a valid client `wg_config`.
+- The only thing missing is: **it must also call `wg set wg0 peer <client_pubkey> allowed-ips <client_ip>/32`** on the EC2 side to register the client. This needs to be wired up properly in [main.py](file:///c:/Users/mohap/OneDrive/Desktop/Coadex%202_0/ec2_backend/main.py).
+
+> [!IMPORTANT]
+> **Backend fix needed before Desktop Client will work**: `POST /session/start` must actually add the client as a WireGuard peer via `WireGuardTunnel.add_peer()`. Currently it generates the config but doesn't register the peer on `wg0`. Without this, the tunnel handshake will fail.
+
+---
+
+## Phase 3 — OpenCV (Future, Not Now)
+- Keep completely separate from tunnel logic.
+- Activate only on candidate consent.
+- Send only anomaly events (not raw video frames).
+- Will be added as an optional Python process spawned by Electron.
+
+---
+
+## Deferred / Out of Scope for MVP
+- Full Reviewer Dashboard (HTML/JS dashboard is already scaffolded in `/dashboard/`)
+- mitmproxy HTTPS inspection
+- Multiple concurrent sessions
+- Session authentication tokens (JWT)

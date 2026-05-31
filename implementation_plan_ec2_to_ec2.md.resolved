@@ -1,0 +1,216 @@
+# OPTIMUS – Final Implementation Plan (EC2 Architecture Migration)
+
+> **Rules before writing a single line of code:**
+> - Perform a full codebase audit first (Phase 0).
+> - Reuse all existing stable modules. Do NOT replace working logic.
+> - No fake tunnel success. No placeholder data. No simulated states.
+> - Electron is archived, not deleted. It never participates in active execution.
+
+---
+
+## Target Architecture
+
+```
+Candidate EC2 → Session Join → WireGuard Tunnel → Optimus Monitoring EC2
+→ DNS Monitoring → Categorization → AI Enrichment → Risk Analysis
+→ Live Dashboard → Report Generation → SMTP Delivery
+```
+
+---
+
+## Phase 0 – Electron Decommissioning Audit
+
+**First task. Do this before anything else.**
+
+Audit and produce a report covering:
+
+| Area | Action |
+|---|---|
+| Electron runtime deps | Remove from active execution paths |
+| IPC communication code | Remove from active architecture |
+| Desktop tunnel workflows | Remove |
+| Windows-specific WireGuard paths | Remove |
+| Electron session assumptions | Refactor |
+| Electron-only config requirements | Remove |
+| Desktop UI deps in backend services | Remove |
+| Desktop-app startup requirements | Remove |
+| Backend services | Refactor to run independently |
+| Monitoring system | Verify works without Electron |
+
+> **Do NOT delete `Optimus/electron_app/`.  Archive it at `electron_app_archive/`. It must not participate in active execution.**
+
+---
+
+## Phase 1 – Session Management
+
+**File:** `backend/session_manager.py`
+
+Store: session ID, candidate ID, start/end time, tunnel status, risk score, report path.
+
+```
+POST /session/create
+POST /session/start
+POST /session/end
+GET  /session/{id}
+GET  /session/list
+```
+
+---
+
+## Phase 2 – WireGuard Peer Management
+
+**File:** `backend/wg_peer.py`
+
+- Dynamic peer creation & removal via `wg set`
+- Session-to-peer mapping persisted in SQLite
+- **Reuse existing WireGuard infrastructure. Do NOT redesign.**
+- Validate **handshake + RX/TX bytes** before marking tunnel CONNECTED
+- No fake success states.
+
+---
+
+## Phase 3 – DNS Intelligence Engine
+
+**Reuse existing modules. Do NOT replace.**
+
+| Existing file | Role |
+|---|---|
+| `dns_capture.py` | Packet capture |
+| `dns_logger.py` | Structured logging |
+| `dns_categorizer_v2.py` | Category lookup |
+| `domain_intelligence_db.py` | Intelligence persistence |
+| `monitor_v3.py` | Orchestration |
+
+Pipeline: `DNS Query → Capture → Categorization → AI Enrichment → Risk Engine`
+
+All events stored per session.
+
+---
+
+## Phase 4 – AI Enrichment
+
+Reuse existing **Sarvam integration**.
+
+Store: category, confidence, source, timestamp for every unknown domain.
+
+---
+
+## Phase 5 – OpenCV Verification (Optional)
+
+**File:** `backend/opencv_events.py`
+
+Track only: face present, face missing duration, multiple faces, multiple-person events.
+
+- OpenCV failure **must never stop monitoring.**
+- Enable/disable independently via `--camera` flag.
+
+---
+
+## Phase 6 – Risk Engine
+
+**File:** `backend/risk_engine.py`
+
+Inputs: AI domain count, domain switching rate, DNS bursts, OpenCV alerts, session anomalies.
+
+| Score | Level |
+|---|---|
+| 0–30 | 🟢 Low |
+| 31–70 | 🟡 Medium |
+| 71–100 | 🔴 High |
+
+---
+
+## Phase 7 – Optimus Control Center (Dashboard)
+
+**Stack:** Rich + Textual  
+**File:** `backend/dashboard/dashboard.py`
+
+Required sections:
+
+1. Optimus Banner
+2. Session Information
+3. Candidate Status
+4. Tunnel Status
+5. Session Duration
+6. Risk Score (live)
+7. Live Domain Feed
+8. Category Distribution
+9. Top Domains
+10. Suspicious Events
+11. OpenCV Status
+12. AI Enrichment Activity
+
+Must be **visually polished and demo-ready.**
+
+---
+
+## Phase 8 – Reporting System
+
+**Directory:** `backend/reporting/`
+
+```
+reports/
+├── active/
+└── completed/
+```
+
+Generate **three outputs simultaneously** on session end:
+
+1. **Terminal summary** – printed via Rich (duration, domains, AI domains, categories, events, risk score, final verdict)
+2. **JSON** – `reports/completed/{session_id}.json`
+3. **HTML** – `reports/completed/{session_id}.html`
+
+---
+
+## Phase 9 – SMTP Email Delivery
+
+**File:** `backend/email/smtp_sender.py`
+
+Triggered on session end. SMTP credentials from environment variables only.
+
+Email contains: session summary, risk score, AI domains, suspicious events, OpenCV findings, HTML report attachment.
+
+---
+
+## Phase 10 – Candidate Node
+
+**File:** `client/join_session.py`
+
+```
+Enter Session ID → Validate → Fetch WireGuard Config
+→ Establish Tunnel → Heartbeat Active → Monitoring Active
+```
+
+Optional flag: `--camera` enables OpenCV event reporting.
+
+---
+
+## Success Validation Checklist
+
+| # | Condition |
+|---|---|
+| ✓ | Electron not in runtime |
+| ✓ | Session creation works |
+| ✓ | Session join works |
+| ✓ | WireGuard handshake verified |
+| ✓ | Traffic routes through Monitoring EC2 |
+| ✓ | DNS monitoring captures domains |
+| ✓ | Categorization works |
+| ✓ | AI enrichment works |
+| ✓ | Risk scoring works |
+| ✓ | Dashboard updates live |
+| ✓ | OpenCV events recorded |
+| ✓ | JSON report generated |
+| ✓ | HTML report generated |
+| ✓ | SMTP email sent |
+| ✓ | Terminal summary displayed |
+
+---
+
+## Failure Handling
+
+If repeated failures occur without progress:
+
+- **STOP execution immediately.**
+- Report: exact failing component, root cause, logs, recommended fix.
+- Do not endlessly retry broken implementations.

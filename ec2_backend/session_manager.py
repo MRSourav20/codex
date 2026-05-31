@@ -47,6 +47,7 @@ def create_session(candidate_id):
     # but for local testing we will just return the data.
     return {
         "session_id": session_id,
+        "client_pubkey": client_pubkey,
         "client_privkey": client_privkey,
         "client_ip": client_ip,
         "status": "active"

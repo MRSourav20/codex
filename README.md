@@ -1,82 +1,100 @@
-# Coadex 2.0: AI-Powered Behavioral Interview Integrity
+# Optimus Monitoring Platform
 
-**Coadex 2.0** is a next-generation integrity platform designed to detect AI-assisted cheating during remote technical interviews. By monitoring multi-layer behavioral signals through a secure AWS EC2 gateway, Coadex identifies suspicious patterns (like ChatGPT usage, browser switching, and rapid query bursts) without invasive deep packet inspection.
-
----
-
-## 🚀 The Mission
-Modern remote interviews are plagued by AI-overlay tools and "proxy" interviewers. Coadex solves this by creating a **Behavioral Intelligence Fingerprint** of the candidate, ensuring the person being interviewed is the one providing the answers.
+A live intelligence monitoring system that captures, categorizes, enriches, and reports on network activity in real-time.
 
 ---
 
-## 🏗️ System Architecture
+## Quick Start
 
-### 1. **Candidate Client (Desktop App)**
-*   **Electron-based**: A secure desktop environment that manages the session.
-*   **Hardware Isolation**: Monitors OS-level events (clipboard, tab switches, process blacklists) that browser-only solutions cannot see.
+### 1. Install dependencies
 
-### 2. **Backend Intelligence Gateway (AWS EC2)**
-*   **Traffic Interception**: Uses a high-performance `FastAPI` gateway.
-*   **DNS/SNI Analysis**: Leverages `PyShark`/`TShark` to capture network metadata in real-time.
-*   **Enrichment Pipeline**: 
-    1.  **Rule-based**: Instant classification of common domains.
-    2.  **Intelligence DB**: SQLite-backed local cache for rapid lookups.
-    3.  **AI Enrichment**: Deep categorization using the **Sarvam AI** model for unknown/suspicious traffic.
-
-### 3. **Anomaly Engine**
-*   **EMA Bursts**: Detects rapid, non-human query patterns using Exponential Moving Averages.
-*   **Behavioral Correlation**: Flags suspicious overlaps (e.g., a tab switch followed by a massive clipboard paste).
-
----
-
-## 🛠️ Tech Stack
-*   **Core**: Python 3.12, FastAPI
-*   **Networking**: WireGuard (Session Tunnels), PyShark, TShark
-*   **AI/ML**: Sarvam-m (LLM Enrichment), Scikit-Learn (Anomaly Detection)
-*   **Database**: SQLite (Encrypted Event Storage)
-*   **Infrastructure**: AWS EC2 (Ubuntu 22.04), t3.micro
-
----
-
-## 📂 Repository Structure
-*   `backend/api/`: FastAPI endpoints for session lifecycle.
-*   `backend/dns_monitor/`: Robust packet capture and field-introspection logic.
-*   `backend/enrichment/`: AI-powered domain classification and Sarvam integration.
-*   `backend/intelligence/`: Persistent intelligence database and historical logging.
-*   `backend/anomaly_engine/`: Statistical behavioral analysis modules.
-
----
-
-## 🏁 Quick Start (Judges)
-
-### 1. Requirements
-*   Ubuntu 22.04 (Recommended)
-*   Python 3.10+
-*   TShark (`sudo apt install tshark`)
-
-### 2. Live Monitoring Setup
 ```bash
-# 1. Install Dependencies
-chmod +x setup.sh
-./setup.sh
+pip install -r requirements.txt
+```
 
-# 2. Configure Environment
-cp .env.example .env
-# Add your SARVAM_API_KEY and WireGuard keys
+### 2. Verify Sarvam API key in `.env`
 
-# 3. Start the Enhanced Orchestrator
-# This starts the Capture -> Categorizer -> AI Enrichment pipeline
-sudo venv/bin/python3 backend/monitor_v3.py
+```
+SARVAM_API_KEY=sk_...
+```
+
+### 3. (Optional) Configure email delivery in `.env`
+
+```
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your@gmail.com
+SMTP_PASS=your-app-password
+SMTP_TO=recipient@example.com
+```
+
+### 4. Start the monitor (requires root for packet capture)
+
+```bash
+sudo python3 optimus.py
 ```
 
 ---
 
-## 📈 Roadmap
-- [x] **Phase 1**: AWS Infrastructure & WireGuard Tunneling
-- [x] **Phase 2**: Multi-version Robust DNS Capture (PyShark Fixes)
-- [x] **Phase 3**: AI Enrichment Pipeline with Sarvam AI
-- [ ] **Phase 4**: Electron Desktop App Integration
-- [ ] **Phase 5**: Reviewer Interactive Dashboard
+## Demo Mode (Phase 7)
+
+Open a **second terminal** and run DNS lookups while the dashboard is running:
+
+```bash
+nslookup github.com
+nslookup chat.openai.com
+nslookup claude.ai
+nslookup google.com
+nslookup stackoverflow.com
+nslookup youtube.com
+nslookup perplexity.ai
+```
+
+The dashboard captures and categorizes each domain in real-time.
 
 ---
-*Built for the next generation of honest hiring.*
+
+## On Exit (Ctrl+C)
+
+When you stop the monitor, Optimus automatically:
+
+1. Generates `reports/<session_id>.json`
+2. Generates `reports/<session_id>.html` (styled dark-theme report)
+3. Generates `reports/<session_id>.txt` (plain text summary)
+4. Sends email (if SMTP configured)
+
+---
+
+## Architecture
+
+```
+optimus.py
+├── backend/session_manager.py         Session lifecycle
+├── backend/dns_monitor/
+│   ├── dns_capture.py                 Packet capture (pyshark)
+│   └── dns_logger.py                  SQLite logging
+├── backend/enrichment/
+│   ├── dns_categorizer_v2.py          Rule-based categorization
+│   └── Sarvam_enrichment.py           AI enrichment (Sarvam API)
+├── backend/intelligence/
+│   └── domain_intelligence_db.py      Local domain cache
+├── backend/anomaly_engine/
+│   └── dns_event_detector.py          Suspicious event detection
+├── backend/reporting/
+│   └── report_generator.py            JSON / HTML / TXT reports
+├── backend/email/
+│   └── smtp_sender.py                 Email delivery
+└── backend/opencv_events.py           Face monitoring (optional)
+```
+
+---
+
+## Reports Location
+
+All reports are saved in `reports/` directory:
+
+| File | Description |
+|------|-------------|
+| `<session_id>.json` | Full structured data |
+| `<session_id>.html` | Styled HTML for sharing |
+| `<session_id>.txt`  | Plain text summary |

@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import session_manager
 import os
+import session_tunnel
 
 app = FastAPI(title="Coadex 2.0 Identity Gateway")
 
@@ -16,6 +17,17 @@ class EventReport(BaseModel):
 @app.post("/session/start")
 async def start_session(request: SessionStartRequest):
     session_data = session_manager.create_session(request.candidate_id)
+
+    wg_interface = os.getenv("WG_INTERFACE", "wg0")
+    client_pubkey = session_data.get("client_pubkey", "")
+    client_ip = session_data["client_ip"]
+
+    peer_added = False
+    if client_pubkey:
+        try:
+            peer_added = session_tunnel.add_peer(wg_interface, client_pubkey, client_ip)
+        except Exception:
+            peer_added = False
     
     # Constructing the WireGuard config for the client
     # These would normally come from an environment config or server state
@@ -24,7 +36,7 @@ async def start_session(request: SessionStartRequest):
     
     wg_config = f"""[Interface]
 PrivateKey = {session_data['client_privkey']}
-Address = {session_data['client_ip']}/32
+Address = {client_ip}/32
 DNS = 1.1.1.1
 
 [Peer]
@@ -36,6 +48,8 @@ PersistentKeepalive = 25
     return {
         "session_id": session_data["session_id"],
         "wg_config": wg_config,
+        "client_ip": client_ip,
+        "peer_registered": peer_added,
         "status": "active"
     }
 

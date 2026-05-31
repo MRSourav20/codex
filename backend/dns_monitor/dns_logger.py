@@ -70,7 +70,8 @@ class DNSLogger:
                     source TEXT,
                     confidence REAL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(timestamp, domain)
+                    session_id TEXT,
+                    UNIQUE(timestamp, domain, source_ip)
                 )
             ''')
             
@@ -84,9 +85,16 @@ class DNSLogger:
                     first_seen TEXT,
                     last_seen TEXT,
                     details TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    session_id TEXT
                 )
             ''')
+            
+            for table in ['dns_queries', 'suspicious_events']:
+                try:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN session_id TEXT")
+                except sqlite3.OperationalError:
+                    pass
             
             # Create statistics table
             cursor.execute('''
@@ -119,7 +127,8 @@ class DNSLogger:
         protocol: str = 'UDP',
         category: Optional[str] = None,
         source: Optional[str] = None,
-        confidence: Optional[float] = None
+        confidence: Optional[float] = None,
+        session_id: Optional[str] = None
     ) -> bool:
         """
         Log a DNS query to database and JSON.
@@ -143,9 +152,9 @@ class DNSLogger:
                 
                 cursor.execute('''
                     INSERT OR IGNORE INTO dns_queries
-                    (timestamp, domain, source_ip, query_type, protocol, category, source, confidence)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (timestamp, domain, source_ip, query_type, protocol, category, source, confidence))
+                    (timestamp, domain, source_ip, query_type, protocol, category, source, confidence, session_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (timestamp, domain, source_ip, query_type, protocol, category, source, confidence, session_id))
                 
                 conn.commit()
                 conn.close()
@@ -159,7 +168,8 @@ class DNSLogger:
                     'protocol': protocol,
                     'category': category,
                     'source': source,
-                    'confidence': confidence
+                    'confidence': confidence,
+                    'session_id': session_id
                 }
                 
                 with open(self.json_path, 'a') as f:
@@ -178,7 +188,8 @@ class DNSLogger:
         count: int = 1,
         first_seen: Optional[str] = None,
         last_seen: Optional[str] = None,
-        details: Optional[dict] = None
+        details: Optional[dict] = None,
+        session_id: Optional[str] = None
     ) -> bool:
         """
         Log a suspicious event.
@@ -203,9 +214,9 @@ class DNSLogger:
                 
                 cursor.execute('''
                     INSERT INTO suspicious_events
-                    (event_type, domain, count, first_seen, last_seen, details)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (event_type, domain, count, first_seen, last_seen, details_json))
+                    (event_type, domain, count, first_seen, last_seen, details, session_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (event_type, domain, count, first_seen, last_seen, details_json, session_id))
                 
                 conn.commit()
                 conn.close()
@@ -339,27 +350,30 @@ class DNSLogger:
             logger.error(f"Error retrieving statistics: {str(e)}")
             return {}
     
-    def get_suspicious_events(self, limit: int = 50) -> List[Dict]:
+    def get_suspicious_events(self, limit: int = 50, session_id: Optional[str] = None) -> List[Dict]:
         """
         Get recent suspicious events.
-        
-        Args:
-            limit: Maximum number of events to return
-            
-        Returns:
-            List of event dicts
         """
         try:
             conn = sqlite3.connect(str(self.db_path))
             cursor = conn.cursor()
             
-            cursor.execute('''
-                SELECT event_type, domain, count, first_seen, last_seen, details
-                FROM suspicious_events
-                ORDER BY created_at DESC
-                LIMIT ?
-            ''', (limit,))
-            
+            if session_id:
+                cursor.execute('''
+                    SELECT event_type, domain, count, first_seen, last_seen, details
+                    FROM suspicious_events
+                    WHERE session_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                ''', (session_id, limit))
+            else:
+                cursor.execute('''
+                    SELECT event_type, domain, count, first_seen, last_seen, details
+                    FROM suspicious_events
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                ''', (limit,))
+                
             rows = cursor.fetchall()
             conn.close()
             

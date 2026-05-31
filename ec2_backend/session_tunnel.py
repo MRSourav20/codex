@@ -26,7 +26,7 @@ PersistentKeepalive = 25
 def add_peer(interface, client_pubkey, allowed_ip):
     """Adds a peer to the WireGuard interface using the 'wg' command."""
     try:
-        subprocess.run(["wg", "set", interface, "peer", client_pubkey, "allowed-ips", f"{allowed_ip}/32"], check=True)
+        subprocess.run(["sudo", "wg", "set", interface, "peer", client_pubkey, "allowed-ips", f"{allowed_ip}/32"], check=True)
         return True
     except subprocess.CalledProcessError as e:
         print(f"Error adding peer: {e}")
@@ -35,7 +35,7 @@ def add_peer(interface, client_pubkey, allowed_ip):
 def remove_peer(interface, client_pubkey):
     """Removes a peer from the WireGuard interface."""
     try:
-        subprocess.run(["wg", "set", interface, "peer", client_pubkey, "remove"], check=True)
+        subprocess.run(["sudo", "wg", "set", interface, "peer", client_pubkey, "remove"], check=True)
         return True
     except subprocess.CalledProcessError as e:
         print(f"Error removing peer: {e}")
